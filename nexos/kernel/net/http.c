@@ -36,7 +36,9 @@ static int h_atoi(const char *s) {
 static int parse_url(const char *url, char *host_out, int host_max,
                      uint16_t *port_out, char *path_out, int path_max) {
     const char *p = url;
-    /* skip "http://" */
+    /* This client is deliberately HTTP-only; never interpret another
+       scheme as a hostname (for example, "https://site" -> host "https"). */
+    if (h_strncmp(p, "https://", 8) == 0) return -2;
     if (h_strncmp(p, "http://", 7) == 0) p += 7;
 
     /* host[:port] ends at first '/' or end of string */
@@ -61,13 +63,99 @@ static int parse_url(const char *url, char *host_out, int host_max,
     return 0;
 }
 
+/* ── header helpers ──────────────────────────────────────────────────────── */
+static int h_ci_equal(const uint8_t *a, const char *b, int n) {
+    for (int i = 0; i < n; i++) {
+        uint8_t ca = a[i];
+        char cb = b[i];
+        if (ca >= 'A' && ca <= 'Z') ca = (uint8_t)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = (char)(cb + 32);
+        if (ca != (uint8_t)cb) return 0;
+    }
+    return 1;
+}
+
+/* Return the value after a header name, or NULL. The returned pointer points
+   into the response buffer and is only valid until that buffer is freed. */
+static const uint8_t *find_header(const uint8_t *data, uint32_t len,
+                                  const char *name, int name_len) {
+    uint32_t i = 0;
+    while (i + (uint32_t)name_len < len) {
+        uint32_t line = i;
+        uint32_t end = line;
+        while (end + 1 < len && !(data[end] == '\r' && data[end+1] == '\n')) end++;
+        if (end == line) break;
+        if (end - line > (uint32_t)name_len &&
+            h_ci_equal(data + line, name, name_len) &&
+            data[line + name_len] == ':') {
+            uint32_t p = line + (uint32_t)name_len + 1;
+            while (p < end && (data[p] == ' ' || data[p] == '\t')) p++;
+            return data + p;
+        }
+        i = (end + 2 <= len) ? end + 2 : len;
+    }
+    return 0;
+}
+
+static int header_value_len(const uint8_t *p, const uint8_t *end) {
+    const uint8_t *q = p;
+    while (q < end && *q != '\r' && *q != '\n') q++;
+    return (int)(q - p);
+}
+
+static int has_chunked_encoding(const uint8_t *p, int len) {
+    for (int i = 0; i + 7 < len; i++) {
+        if ((p[i] == 'c' || p[i] == 'C') &&
+            (p[i+1] == 'h' || p[i+1] == 'H') &&
+            (p[i+2] == 'u' || p[i+2] == 'U') &&
+            (p[i+3] == 'n' || p[i+3] == 'N') &&
+            (p[i+4] == 'k' || p[i+4] == 'K') &&
+            (p[i+5] == 'e' || p[i+5] == 'E') &&
+            (p[i+6] == 'd' || p[i+6] == 'D')) return 1;
+    }
+    return 0;
+}
+
+static int hex_value(uint8_t c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Decode HTTP chunked transfer coding in place. */
+static uint32_t decode_chunked(uint8_t *data, uint32_t len) {
+    uint32_t src = 0, dst = 0;
+    while (src < len) {
+        uint32_t size = 0;
+        int digits = 0;
+        while (src < len && data[src] != '\r' && data[src] != '\n') {
+            int v = hex_value(data[src++]);
+            if (v < 0) return 0;
+            size = (size << 4) | (uint32_t)v;
+            digits++;
+            if (size > HTTP_BUF_SIZE) return 0;
+        }
+        if (!digits || src + 1 >= len || data[src] != '\r' || data[src+1] != '\n') return 0;
+        src += 2;
+        if (size == 0) return dst;
+        if (src + size > len || dst + size > len) return 0;
+        for (uint32_t i = 0; i < size; i++) data[dst++] = data[src++];
+        if (src + 1 >= len || data[src] != '\r' || data[src+1] != '\n') return 0;
+        src += 2;
+    }
+    return 0;
+}
+
 /* ── build GET request into buf ─────────────────────────────────────────── */
 static int build_request(uint8_t *buf, int buf_sz,
                          const char *host, const char *path) {
-    /* "GET /path HTTP/1.0\r\nHost: hostname\r\nUser-Agent: NexOS/1.0\r\nConnection: close\r\n\r\n" */
+    /* HTTP/1.1 is required by many current web servers. Connection: close
+       keeps the TCP implementation simple while still allowing framing via
+       Content-Length or chunked transfer encoding. */
     const char *method = "GET ";
-    const char *ver    = " HTTP/1.0\r\nHost: ";
-    const char *ua     = "\r\nUser-Agent: NexOS/1.0\r\nConnection: close\r\n\r\n";
+    const char *ver    = " HTTP/1.1\r\nHost: ";
+    const char *ua     = "\r\nUser-Agent: NexOS/1.0\r\nAccept: text/html,text/plain\r\nConnection: close\r\n\r\n";
     int pos = 0;
     for (int i = 0; method[i] && pos < buf_sz - 1; i++) buf[pos++] = (uint8_t)method[i];
     for (int i = 0; path[i]   && pos < buf_sz - 1; i++) buf[pos++] = (uint8_t)path[i];
@@ -108,7 +196,13 @@ http_response_t *http_get(const char *url) {
     char     path[256];
     uint16_t port;
 
-    if (parse_url(url, host, sizeof(host), &port, path, sizeof(path)) < 0)
+    int parse_result = parse_url(url, host, sizeof(host), &port,
+                                 path, sizeof(path));
+    if (parse_result == -2) {
+        klog(LOG_WARN, "HTTP: HTTPS is not supported (TLS is unavailable)");
+        return 0;
+    }
+    if (parse_result < 0)
         return 0;
 
     /* Resolve hostname */
@@ -186,6 +280,15 @@ http_response_t *http_get(const char *url) {
     r->status_code = parse_status(resp_buf, total);
     int body_off   = find_body(resp_buf, total);
 
+    r->location[0] = 0;
+    const uint8_t *location = find_header(resp_buf, total, "Location", 8);
+    if (location) {
+        int n = header_value_len(location, resp_buf + total);
+        if (n > (int)sizeof(r->location) - 1) n = (int)sizeof(r->location) - 1;
+        for (int i = 0; i < n; i++) r->location[i] = (char)location[i];
+        r->location[n] = 0;
+    }
+
     if (body_off < 0 || (uint32_t)body_off >= total) {
         r->body     = 0;
         r->body_len = 0;
@@ -195,6 +298,13 @@ http_response_t *http_get(const char *url) {
         if (r->body) {
             for (uint32_t i = 0; i < r->body_len; i++)
                 r->body[i] = resp_buf[body_off + i];
+            const uint8_t *encoding = find_header(resp_buf, (uint32_t)body_off,
+                                                   "Transfer-Encoding", 17);
+            if (encoding && has_chunked_encoding(encoding,
+                                                  header_value_len(encoding,
+                                                                   resp_buf + body_off))) {
+                r->body_len = decode_chunked(r->body, r->body_len);
+            }
             r->body[r->body_len] = 0;
         }
     }

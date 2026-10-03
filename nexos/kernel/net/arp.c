@@ -69,7 +69,7 @@ int arp_request(uint32_t target_ip, uint8_t mac_out[6]) {
 
     uint64_t deadline = timer_get_ticks() + ARP_TIMEOUT_MS;
     while (timer_get_ticks() < deadline) {
-        rtl8139_receive();
+        rtl8139_service();
         if (arp_lookup(target_ip, mac_out)) return 1;
     }
     return 0;

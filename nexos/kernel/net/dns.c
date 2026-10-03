@@ -111,7 +111,7 @@ int dns_resolve(const char *hostname, uint8_t ip_out[4]) {
 
     uint64_t deadline = timer_get_ticks() + DNS_TIMEOUT;
     while (timer_get_ticks() < deadline) {
-        rtl8139_receive();
+        rtl8139_service();
         if (dns_got_reply) {
             ip_out[0] = dns_result[0];
             ip_out[1] = dns_result[1];

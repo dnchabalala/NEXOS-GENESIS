@@ -13,6 +13,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/paging.h"
+#include "arch/x86_64/fpu.h"
 #include "mm/pmm.h"
 #include "mm/heap.h"
 #include "mm/vmm.h"
@@ -194,18 +195,20 @@ void kernel_main(uint32_t mb2_magic, mb2_info_t *mb2_info) {
     /* ── 3. GDT (with TSS for ring-0 / ring-3 switching) ────────────────── */
     gdt_init();
 
+    /* NetSurf layout uses IEEE floating point. Keep this before interrupts;
+       XSAVE context management is required before multiple FP-using threads
+       are scheduled. The current boot path has one runnable init thread. */
+    fpu_init();
+
     /* ── 4. IDT + enable interrupts ──────────────────────────────────────── */
     idt_init();
     sti();
 
     /* ── 5. Physical Memory Manager ──────────────────────────────────────── */
 
-    /*
-     * Start with an upper-bound of 256 MB; the Multiboot2 memory map may
-     * extend this.  pmm_init() marks every frame as reserved.
-     */
+    /* The Multiboot memory map must be inspected before PMM initialization;
+       otherwise usable RAM above the old 256 MB default is discarded. */
     uint64_t mem_upper = 256ULL * 1024 * 1024;
-    pmm_init(0, mem_upper);
 
     /* Capture kernel cmdline from multiboot2 before the main tag loops */
     static char kernel_cmdline[256];
@@ -226,6 +229,32 @@ void kernel_main(uint32_t mb2_magic, mb2_info_t *mb2_info) {
             tp0 += s0;
         }
     }
+
+    /* First pass: determine the memory-map ceiling before creating the PMM
+       bitmap. The bitmap covers physical addresses through 4 GB. */
+    if (mb2_magic == MULTIBOOT2_BOOTLOADER_MAGIC && mb2_info) {
+        uint8_t *scan = (uint8_t *)mb2_info + 8;
+        while (1) {
+            mb2_tag_t *tag = (mb2_tag_t *)scan;
+            if (tag->type == MB2_TAG_END) break;
+            if (tag->type == MB2_TAG_MMAP) {
+                mb2_tag_mmap_t *mmap = (mb2_tag_mmap_t *)tag;
+                uint32_t num = (mmap->size - 16) / mmap->entry_size;
+                for (uint32_t i = 0; i < num; i++) {
+                    mb2_mmap_entry_t *e = (mb2_mmap_entry_t *)
+                        ((uint8_t *)mmap + 16 + (uint64_t)i * mmap->entry_size);
+                    uint64_t end = e->base_addr + e->length;
+                    if (e->mtype == 1 && end > mem_upper) mem_upper = end;
+                }
+            }
+            uint32_t sz = tag->size;
+            if (sz % 8) sz += 8 - (sz % 8);
+            scan += sz;
+        }
+    }
+    if (mem_upper > 4ULL * 1024 * 1024 * 1024)
+        mem_upper = 4ULL * 1024 * 1024 * 1024;
+    pmm_init(0, mem_upper);
 
     if (mb2_magic == MULTIBOOT2_BOOTLOADER_MAGIC && mb2_info) {
         uint8_t *tag_ptr = (uint8_t *)mb2_info + 8;
@@ -274,7 +303,7 @@ void kernel_main(uint32_t mb2_magic, mb2_info_t *mb2_info) {
      *   b) Kernel image — from linker symbol kernel_start to kernel_end
      *      (code + rodata + data + BSS: PMM bitmap, boot tables, boot stack,
      *      nsh/init statics).  BSS is now ~1.5 MB; no heap array inside it.
-     *   c) Fixed heap window at 0x1200000 (18 MB) — 8 MB for the allocator.
+     *   c) Fixed heap window at 0x1200000 (18 MB) — 32 MB for the allocator.
      *
      * pmm_deinit_region() is safe: decrements pmm_free_pages only when the
      * frame was actually free, preventing counter corruption.
@@ -297,8 +326,8 @@ void kernel_main(uint32_t mb2_magic, mb2_info_t *mb2_info) {
          pmm_get_total_memory() / (1024 * 1024),
          pmm_get_free_frames());
 
-    /* ── 6. Heap — fixed 8 MB at physical 0x1200000 (18 MB mark) ──────────
-     * boot.asm maps 32 MB; this address is always valid.  No BSS array.   */
+    /* ── 6. Heap — fixed 32 MB at physical 0x1200000 (18 MB mark) ─────────
+     * boot.asm maps 2 GB; this address is always valid.  No BSS array.     */
     heap_init((void *)HEAP_START, HEAP_SIZE);
 
     /* ── 7. Paging — inherits boot.asm CR3, no page-table teardown ────────── */

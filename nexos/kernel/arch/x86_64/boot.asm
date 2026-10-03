@@ -49,7 +49,8 @@ section .bss
 align 4096
 boot_pml4:  resb 4096       ; Page-Map Level 4
 boot_pdpt:  resb 4096       ; Page Directory Pointer Table
-boot_pd:    resb 4096       ; Page Directory  (2 MB huge-page entries)
+boot_pd:    resb 4096       ; Page Directory 0 (first 1 GB)
+boot_pd2:   resb 4096       ; Page Directory 1 (second 1 GB)
 
 align 16
 stack_bottom:
@@ -114,19 +115,29 @@ boot_start:
     mov eax, boot_pd
     or  eax, 0x03
     mov [boot_pdpt], eax
+    mov eax, boot_pd2
+    or  eax, 0x03
+    mov [boot_pdpt + 8], eax
 
-    ;  PD[0..15] → 32 MB identity map as 2 MB huge pages
-    ;  Covers the full kernel image + 16 MB BSS heap (kernel_end ≈ 17.5 MB)
-    ;  Each entry n:  physical = n×2MB,  flags = PS|RW|P (0x83)
+    ;  PD[0..1023] → 2 GB identity map as 2 MB huge pages
     xor  ecx, ecx
 .fill_pd:
     mov  eax, ecx
     shl  eax, 21                          ; n × 2 MB
     or   eax, 0x83                        ; page-size | writable | present
-    mov  [boot_pd + ecx*8],     eax       ; low 32 bits
-    mov  dword [boot_pd + ecx*8 + 4], 0  ; high 32 bits (< 4 GB)
+    cmp  ecx, 512
+    jb   .first_gb
+    mov  edx, ecx
+    sub  edx, 512
+    mov  [boot_pd2 + edx*8],     eax
+    mov  dword [boot_pd2 + edx*8 + 4], 0
+    jmp  .next_pd
+.first_gb:
+    mov  [boot_pd + ecx*8],     eax
+    mov  dword [boot_pd + ecx*8 + 4], 0
+.next_pd:
     inc  ecx
-    cmp  ecx, 16                          ; 16 entries × 2 MB = 32 MB
+    cmp  ecx, 1024                        ; 1024 entries × 2 MB = 2 GB
     jl   .fill_pd
 
     ; ── 3. Load GDT (must be done before enabling long mode) ─────────────────

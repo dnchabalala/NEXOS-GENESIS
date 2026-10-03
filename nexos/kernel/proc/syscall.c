@@ -12,6 +12,7 @@
 #include "../drivers/vga.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/timer.h"
+#include "../net/socket_compat.h"
 #include "../drivers/rtc.h"
 #include "../mm/pmm.h"
 #include "../mm/vmm.h"
@@ -188,6 +189,7 @@ static uint32_t vfs_type_to_mode(uint32_t vtype) {
     if (vtype & VFS_NODE_CHARDEV) return 0x2000 | 0x1B6; /* chr  0666 */
     if (vtype & VFS_NODE_BLKDEV)  return 0x6000 | 0x1B6; /* blk  0666 */
     if (vtype & VFS_NODE_PIPE)    return 0x1000 | 0x1B6; /* fifo 0666 */
+    if (vtype & VFS_NODE_SOCKET)  return 0xC000 | 0x1B6; /* socket 0666 */
     if (vtype & VFS_NODE_SYMLINK) return 0xA000 | 0x1FF; /* lnk  0777 */
     return 0x8000 | 0x1A4;                                /* reg  0644 */
 }
@@ -369,6 +371,7 @@ uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3,
         klog(LOG_DEBUG, "sys_close(fd=%d)", fd);
         if (!proc || fd < 0 || fd >= MAX_FDS) RET_ERR(EBADF);
         if (!proc->fds[fd]) RET_ERR(EBADF);
+        vfs_close(proc->fds[fd]);
         proc_close_fd(proc, fd);
         proc->fd_offsets[fd] = 0;
         return 0;
@@ -1079,15 +1082,64 @@ uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3,
         return total;
     }
 
-    /* ── 41-50: socket family stubs ─────────────────────────────────────── */
-    case SYS_SOCKET:
-    case SYS_CONNECT:
-    case SYS_ACCEPT:
-    case SYS_SENDTO:
-    case SYS_RECVFROM:
-    case SYS_BIND:
-    case SYS_LISTEN:
-        RET_ERR(ENOSYS);   /* networking via syscalls not yet wired */
+    /* ── 41: minimal AF_INET/SOCK_STREAM adapter over NexOS TCP ─────────── */
+    case SYS_SOCKET: {
+        int domain = (int)a1;
+        int type = (int)a2;
+        process_t *p = proc_get_current();
+        vfs_node_t *node;
+        int fd;
+        if (domain != 2 || (type & 0xF) != 1 || !p) RET_ERR(EAFNOSUPPORT);
+        node = nexos_socket_create();
+        if (!node) RET_ERR(ENOMEM);
+        fd = proc_open_fd(p, node);
+        if (fd < 0) { vfs_close(node); RET_ERR(EMFILE); }
+        return (uint64_t)fd;
+    }
+
+    /* Linux sockaddr_in: family (2), port (network order), IPv4 address. */
+    case SYS_CONNECT: {
+        typedef struct { uint16_t family; uint16_t port; uint32_t addr;
+                         uint8_t zero[8]; } socket_addr4_t;
+        int fd = (int)a1;
+        socket_addr4_t *addr = (socket_addr4_t *)(uintptr_t)a2;
+        uint8_t *ipb;
+        uint32_t ip;
+        if (!proc || fd < 0 || fd >= MAX_FDS || !proc->fds[fd] ||
+            !addr || (uint32_t)a3 < sizeof(socket_addr4_t) || addr->family != 2)
+            RET_ERR(EINVAL);
+        ipb = (uint8_t *)&addr->addr;
+        ip = ((uint32_t)ipb[0] << 24) | ((uint32_t)ipb[1] << 16) |
+             ((uint32_t)ipb[2] << 8) | ipb[3];
+        if (nexos_socket_connect(proc->fds[fd], ip,
+                                  (uint16_t)((addr->port >> 8) |
+                                             (addr->port << 8))) < 0)
+            RET_ERR(ETIMEDOUT);
+        return 0;
+    }
+
+    case SYS_SENDTO: {
+        int fd = (int)a1;
+        const uint8_t *buf = (const uint8_t *)(uintptr_t)a2;
+        uint32_t len = (uint32_t)a3;
+        if (!proc || fd < 0 || fd >= MAX_FDS || !proc->fds[fd] || !buf)
+            RET_ERR(EBADF);
+        if (!nexos_socket_connected(proc->fds[fd])) RET_ERR(ENOTCONN);
+        return vfs_write(proc->fds[fd], 0, len, buf);
+    }
+
+    case SYS_RECVFROM: {
+        int fd = (int)a1;
+        uint8_t *buf = (uint8_t *)(uintptr_t)a2;
+        uint32_t len = (uint32_t)a3;
+        if (!proc || fd < 0 || fd >= MAX_FDS || !proc->fds[fd] || !buf)
+            RET_ERR(EBADF);
+        if (!nexos_socket_connected(proc->fds[fd])) RET_ERR(ENOTCONN);
+        return vfs_read(proc->fds[fd], 0, len, buf);
+    }
+
+    case SYS_ACCEPT: case SYS_BIND: case SYS_LISTEN:
+        RET_ERR(ENOSYS);   /* no server-side socket path in milestone 1 */
 
     /* ── 56: clone() ────────────────────────────────────────────────────── */
     case SYS_CLONE:
@@ -1935,12 +1987,24 @@ uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3,
         return 0;
     }
 
-    /* ── 318: getrandom — RDTSC-based entropy ────────────────────────────── */
+    /* ── 318: getrandom — hardware entropy with a conservative fallback ─── */
     case SYS_GETRANDOM: {
         uint8_t *buf   = (uint8_t *)(uintptr_t)a1;
         size_t   count = (size_t)a2;
         if (!buf) RET_ERR(EFAULT);
+        uint32_t eax, ebx, ecx, edx;
+        __asm__ volatile("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                         : "a"(1), "c"(0));
+        int rdrand = (ecx & (1u << 30)) != 0;
         for (size_t i = 0; i < count; i++) {
+            if (rdrand) {
+                uint32_t value;
+                uint8_t ok;
+                __asm__ volatile("rdrand %0; setc %1" : "=r"(value), "=qm"(ok));
+                if (ok) { buf[i] = (uint8_t)value; continue; }
+            }
+            /* QEMU images without RDRAND have no hardware entropy device in
+             * this kernel yet. TLS must reject this fallback for keys. */
             uint32_t lo, hi;
             __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
             uint64_t tsc = ((uint64_t)hi << 32) | lo;

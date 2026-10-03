@@ -29,7 +29,7 @@ VBoxManage createvm --name "$VM_NAME" --ostype "Other_64" --register
 
 echo "[vbox] Configuring hardware..."
 VBoxManage modifyvm "$VM_NAME" \
-    --memory 512 \
+    --memory 2048 \
     --vram 16 \
     --cpus 2 \
     --nic1 nat \

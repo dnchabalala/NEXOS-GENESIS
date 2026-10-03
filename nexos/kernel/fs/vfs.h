@@ -12,6 +12,7 @@
 #define VFS_NODE_PIPE    0x10
 #define VFS_NODE_SYMLINK 0x20
 #define VFS_NODE_MOUNT   0x40
+#define VFS_NODE_SOCKET  0x80
 
 #define VFS_NAME_MAX 256
 #define VFS_PATH_MAX 1024

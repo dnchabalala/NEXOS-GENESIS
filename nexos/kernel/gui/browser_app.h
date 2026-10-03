@@ -5,6 +5,7 @@
 
 #define BROWSER_URL_MAX   512
 #define BROWSER_BUF_MAX   (24 * 1024)
+#define BROWSER_HTML_MAX  (64 * 1024)
 
 typedef enum {
     BSTATE_IDLE,
@@ -19,6 +20,8 @@ typedef struct {
     int              url_len;
     char             text[BROWSER_BUF_MAX];
     int              text_len;
+    char             html[BROWSER_HTML_MAX];
+    int              html_len;
     int              scroll;
     int              line_count;
     browser_state_t  state;

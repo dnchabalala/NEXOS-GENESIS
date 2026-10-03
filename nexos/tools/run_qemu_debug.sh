@@ -10,7 +10,7 @@ echo "[QEMU-DEBUG] Load symbols with: symbol-file build/nexos.kernel"
 
 qemu-system-x86_64 \
     -machine q35 \
-    -m 256M \
+    -m 2048M \
     -serial stdio \
     -display sdl \
     -cdrom "$ISO" \

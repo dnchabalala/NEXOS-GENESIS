@@ -1322,7 +1322,8 @@ static int cmd_ping(int argc, char *argv[]) {
             nsh_print("Request timeout for icmp_seq=");
             nsh_uint_str((uint64_t)seq, buf); nsh_println(buf);
         }
-        if (seq < 4) timer_sleep_ms(1000);
+        /* Keep the GUI command responsive while retaining four real probes. */
+        if (seq < 4) timer_sleep_ms(250);
     }
 
     nsh_println("");

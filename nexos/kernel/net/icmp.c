@@ -9,7 +9,7 @@
 #define ICMP_ECHO_REPLY    0
 #define ICMP_HDR_LEN       8
 #define ICMP_DATA_LEN      32
-#define PING_TIMEOUT_MS  1000
+#define PING_TIMEOUT_MS  500
 
 static uint16_t icmp_id  = 0x4E58;  /* 'NX' */
 static uint16_t icmp_seq = 0;
@@ -52,7 +52,7 @@ int icmp_send_echo(uint32_t dest_ip) {
 
     uint64_t deadline = t0 + PING_TIMEOUT_MS;
     while (timer_get_ticks() < deadline) {
-        rtl8139_receive();
+        rtl8139_service();
         if (icmp_got_reply && icmp_reply_seq == seq)
             return (int)(timer_get_ticks() - t0);
     }

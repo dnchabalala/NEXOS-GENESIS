@@ -18,6 +18,8 @@ KERNEL = kernel
 BOOT   = boot
 USER   = userspace
 TOOLS  = tools
+NETSURF_SOURCE_DIR ?= ports/netsurf/src
+TLS_SOURCE_DIR ?= ports/tls/src/mbedtls-3.6.7
 
 KERNEL_ELF = $(BUILD)/nexos.kernel
 ISO_FILE   = $(BUILD)/nexos.iso
@@ -41,6 +43,7 @@ KERNEL_C_SOURCES = \
         $(KERNEL)/arch/x86_64/gdt.c \
         $(KERNEL)/arch/x86_64/idt.c \
         $(KERNEL)/arch/x86_64/paging.c \
+        $(KERNEL)/arch/x86_64/fpu.c \
         $(KERNEL)/drivers/vga.c \
         $(KERNEL)/drivers/serial.c \
         $(KERNEL)/drivers/keyboard.c \
@@ -71,6 +74,7 @@ KERNEL_C_SOURCES = \
         $(KERNEL)/net/dns.c \
         $(KERNEL)/net/dhcp.c \
         $(KERNEL)/net/tcp.c \
+        $(KERNEL)/net/socket_compat.c \
         $(KERNEL)/net/http.c \
         $(USER)/init/init.c \
         $(USER)/shell/nsh.c \
@@ -116,6 +120,41 @@ DISK_IMG = $(BUILD)/nexos_disk.img
 
 .PHONY: all kernel iso clean run run-debug run-with-disk disk \
         install install-usb run-vbox run-vmware run-installer check
+
+.PHONY: netsurf-sources netsurf-config tls-source tls-check tls-host-test test-tcp
+
+netsurf-sources:
+	@chmod +x $(TOOLS)/netsurf_fetch_sources.sh
+	@$(TOOLS)/netsurf_fetch_sources.sh
+
+netsurf-config: netsurf-sources
+	@command -v gperf >/dev/null 2>&1 || \
+		{ echo "Missing host tool: gperf (required to generate libhubbub parser tables)." >&2; exit 127; }
+	@cp ports/netsurf/Makefile.config $(NETSURF_SOURCE_DIR)/netsurf/Makefile.config
+	@echo "NetSurf first-milestone configuration installed"
+
+tls-source:
+	@chmod +x tools/tls_fetch_source.sh
+	@TLS_SOURCE_DIR=$(dir $(TLS_SOURCE_DIR)) tools/tls_fetch_source.sh
+
+tls-check: tls-source
+	@gcc -std=c11 -ffreestanding -fno-stack-protector -fno-pic \
+		-mno-red-zone -mno-mmx -mno-sse -mno-sse2 -Wall -Wextra -O2 \
+		-m64 -mcmodel=kernel -nostdlib -nostdinc \
+		-Iports/tls/include -I. -Ikernel -Ikernel/include -Iports/tls \
+		-I$(TLS_SOURCE_DIR)/include -Wno-unused-parameter \
+		-Wno-unused-variable -fsyntax-only ports/tls/nexos_tls.c \
+		ports/tls/nexos_tls_tcp.c
+
+tls-host-test: tls-source
+	@$(MAKE) -C $(TLS_SOURCE_DIR) -j2 lib
+	@gcc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror \
+		-I$(TLS_SOURCE_DIR)/include -Iports/tls \
+		tests/https_mbedtls_host_test.c ports/tls/nexos_tls.c \
+		$(TLS_SOURCE_DIR)/library/libmbedtls.a \
+		$(TLS_SOURCE_DIR)/library/libmbedx509.a \
+		$(TLS_SOURCE_DIR)/library/libmbedcrypto.a -o /tmp/nexos-https-test
+	@/tmp/nexos-https-test example.com ports/tls/trust/cacert.pem
 
 all: kernel iso
 
@@ -180,6 +219,9 @@ check-host-tools:
 		{ echo "Missing host tool: $(ASM) (required to assemble the kernel)." >&2; exit 127; }
 	@command -v $(PYTHON) >/dev/null 2>&1 || \
 		{ echo "Missing host tool: $(PYTHON)." >&2; exit 127; }
+
+test-tcp:
+	@tests/tcp_reliability_test.sh
 
 clean:
 	rm -rf $(BUILD)

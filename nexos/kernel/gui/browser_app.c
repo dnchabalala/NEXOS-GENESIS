@@ -19,6 +19,106 @@ static void bcpy(char *d, const char *s, int max) {
 static int beq(const char *a, const char *b) {
     while(*a&&*b&&*a==*b){a++;b++;} return *a==0&&*b==0;
 }
+static int bstarts(const char *s, const char *prefix) {
+    int i = 0;
+    while (prefix[i]) { if (s[i] != prefix[i]) return 0; i++; }
+    return 1;
+}
+
+static int tag_is(const uint8_t *s, int n, const char *name) {
+    int i = 0;
+    while (name[i] && i < n) {
+        uint8_t c = s[i];
+        if (c >= 'A' && c <= 'Z') c = (uint8_t)(c + 32);
+        if (c != (uint8_t)name[i]) return 0;
+        i++;
+    }
+    return name[i] == 0 && i == n;
+}
+
+static int tag_block(const uint8_t *s, int n) {
+    return tag_is(s,n,"p") || tag_is(s,n,"div") || tag_is(s,n,"section") ||
+           tag_is(s,n,"article") || tag_is(s,n,"header") || tag_is(s,n,"footer") ||
+           tag_is(s,n,"li") || tag_is(s,n,"tr") || tag_is(s,n,"br") ||
+           tag_is(s,n,"h1") || tag_is(s,n,"h2") || tag_is(s,n,"h3") ||
+           tag_is(s,n,"h4") || tag_is(s,n,"h5") || tag_is(s,n,"h6");
+}
+
+/* Lightweight visual HTML renderer. It is intentionally deterministic and
+   bounded: malformed pages cannot write beyond a line buffer or framebuffer.
+   CSS and JavaScript remain separate layers; this provides useful structure
+   for static HTML immediately. */
+static void html_render(browser_app_t *b, int bx, int by, int bw, int bh) {
+    int cols = (bw - 20) / 8;
+    int rows = bh / 16;
+    int line = 0, li = 0, heading = 0, link = 0, in_script = 0;
+    char linebuf[256];
+    uint32_t color = COL_TEXT;
+
+    for (int i = 0; i <= b->html_len; i++) {
+        uint8_t c = (i < b->html_len) ? (uint8_t)b->html[i] : '<';
+        if (in_script) {
+            if (c == '<' && i + 8 < b->html_len &&
+                tag_is((const uint8_t *)b->html + i + 2, 6, "/style")) in_script = 0;
+            else if (c == '<' && i + 9 < b->html_len &&
+                     tag_is((const uint8_t *)b->html + i + 2, 7, "/script")) in_script = 0;
+            continue;
+        }
+        if (c == '<' && i < b->html_len) {
+            int end = i + 1;
+            while (end < b->html_len && b->html[end] != '>') end++;
+            int p = i + 1, closing = 0;
+            if (p < end && b->html[p] == '/') { closing = 1; p++; }
+            while (p < end && b->html[p] == ' ') p++;
+            int ns = p;
+            while (p < end && b->html[p] > ' ' && b->html[p] != '/') p++;
+            int nn = p - ns;
+            if (tag_is((const uint8_t *)b->html + ns, nn, "script") ||
+                tag_is((const uint8_t *)b->html + ns, nn, "style")) { in_script = !closing; i = end; continue; }
+            if (tag_block((const uint8_t *)b->html + ns, nn)) {
+                if (li > 0 || (tag_is((const uint8_t *)b->html + ns, nn, "br"))) {
+                    linebuf[li] = 0;
+                    if (line >= b->scroll && line < b->scroll + rows)
+                        font_puts(bx + 10, by + (line-b->scroll)*16, linebuf, color, COL_BASE);
+                    line++; li = 0;
+                }
+                heading = (!closing && nn == 2 && b->html[ns] == 'h');
+                if (heading) color = COL_BLUE;
+                if (closing && nn >= 1 && b->html[ns] == 'h') { heading = 0; color = link ? COL_BLUE : COL_TEXT; }
+            } else if (tag_is((const uint8_t *)b->html + ns, nn, "a")) {
+                link = !closing; color = link ? COL_BLUE : COL_TEXT;
+            } else if (tag_is((const uint8_t *)b->html + ns, nn, "strong") ||
+                       tag_is((const uint8_t *)b->html + ns, nn, "b")) {
+                color = closing ? (link ? COL_BLUE : COL_TEXT) : COL_LAVENDER;
+            }
+            i = end;
+            continue;
+        }
+        if (c == '&') {
+            if (i + 4 < b->html_len && b->html[i+1]=='a' && b->html[i+2]=='m' &&
+                b->html[i+3]=='p' && b->html[i+4]==';') { c='&'; i+=4; }
+            else if (i + 3 < b->html_len && b->html[i+1]=='l' && b->html[i+2]=='t' && b->html[i+3]==';') { c='<'; i+=3; }
+            else if (i + 3 < b->html_len && b->html[i+1]=='g' && b->html[i+2]=='t' && b->html[i+3]==';') { c='>'; i+=3; }
+        }
+        if (c == '\r' || c == '\n' || c == '\t') c = ' ';
+        if (c < 32) continue;
+        if (c == ' ' && (li == 0 || linebuf[li-1] == ' ')) continue;
+        if (li >= cols || li >= 254) {
+            linebuf[li] = 0;
+            if (line >= b->scroll && line < b->scroll + rows)
+                font_puts(bx + 10, by + (line-b->scroll)*16, linebuf, color, COL_BASE);
+            line++; li = 0;
+        }
+        linebuf[li++] = (char)c;
+    }
+    if (li > 0) {
+        linebuf[li] = 0;
+        if (line >= b->scroll && line < b->scroll + rows)
+            font_puts(bx + 10, by + (line-b->scroll)*16, linebuf, color, COL_BASE);
+        line++;
+    }
+    b->line_count = line;
+}
 
 /* ── Simple HTML stripper ────────────────────────────────────────────────── */
 static int html_strip(const uint8_t *src, int slen, char *dst, int dmax) {
@@ -125,7 +225,7 @@ static int html_strip(const uint8_t *src, int slen, char *dst, int dmax) {
 /* ── About pages ─────────────────────────────────────────────────────────── */
 static void load_about(browser_app_t *b, const char *page) {
     if (beq(page,"about:blank")||beq(page,"about:")) {
-        b->text[0]=0; b->text_len=0;
+        b->text[0]=0; b->text_len=0; b->html[0]=0; b->html_len=0;
         b->state=BSTATE_DONE;
         bcpy(b->status,"about:blank",80);
         return;
@@ -133,9 +233,11 @@ static void load_about(browser_app_t *b, const char *page) {
     if (beq(page,"about:nexos")) {
         const char *info =
             "NexOS Browser 1.0\n\n"
-            "A minimal HTTP/1.0 browser for NexOS.\n\n"
-            "- Supports http:// URLs\n"
-            "- Renders plain text + stripped HTML\n"
+            "A lightweight HTTP browser for NexOS.\n\n"
+            "- Supports HTTP/1.1 and http:// URLs\n"
+            "- Follows plain-HTTP redirects\n"
+            "- Renders HTML as readable text\n"
+            "- HTTPS/TLS is not implemented yet\n"
             "- Scroll: click upper/lower content area\n"
             "- Navigate: type URL + Enter\n"
             "- Backspace: edit URL\n\n"
@@ -148,6 +250,7 @@ static void load_about(browser_app_t *b, const char *page) {
             "  about:blank  — blank page\n";
         bcpy(b->text, info, BROWSER_BUF_MAX);
         b->text_len = blen(b->text);
+        b->html_len = 0;
         b->state = BSTATE_DONE;
         bcpy(b->status, "about:nexos", 80);
         return;
@@ -157,11 +260,17 @@ static void load_about(browser_app_t *b, const char *page) {
 }
 
 /* ── Fetch URL ───────────────────────────────────────────────────────────── */
-static void browser_fetch(browser_app_t *b) {
+static void browser_fetch_depth(browser_app_t *b, int redirect_depth) {
     b->text_len = 0; b->text[0] = 0;
     b->scroll = 0; b->line_count = 0;
     b->state = BSTATE_LOADING;
     wm_invalidate(b->win);
+
+    if (redirect_depth > 5) {
+        bcpy(b->status, "Too many redirects", 80);
+        b->state = BSTATE_ERROR;
+        return;
+    }
 
     /* about: pages */
     if (b->url[0]=='a' && b->url[1]=='b') {
@@ -169,8 +278,11 @@ static void browser_fetch(browser_app_t *b) {
         return;
     }
 
-    /* must start with http:// */
-    if (!(b->url[0]=='h'&&b->url[1]=='t'&&b->url[2]=='t'&&b->url[3]=='p')) {
+    /* The current network client supports plain HTTP only. Check the full
+       scheme: accepting just the first four characters makes https:// get
+       misparsed as hostname "https" by the HTTP parser. */
+    if (!(b->url[0]=='h'&&b->url[1]=='t'&&b->url[2]=='t'&&b->url[3]=='p' &&
+          b->url[4]==':'&&b->url[5]=='/'&&b->url[6]=='/')) {
         bcpy(b->status, "Error: URL must start with http://", 80);
         b->state = BSTATE_ERROR;
         return;
@@ -185,6 +297,29 @@ static void browser_fetch(browser_app_t *b) {
 
     if (resp->status_code < 100) {
         bcpy(b->status, "Error: no response", 80);
+        b->state = BSTATE_ERROR;
+        http_free(resp);
+        return;
+    }
+
+    /* Follow a small number of redirects. HTTPS targets are reported clearly
+       instead of being retried as malformed HTTP URLs. */
+    if (resp->status_code >= 300 && resp->status_code < 400 && resp->location[0]) {
+        if (bstarts(resp->location, "https://")) {
+            bcpy(b->status, "Redirect requires HTTPS/TLS", 80);
+            b->state = BSTATE_ERROR;
+            http_free(resp);
+            return;
+        }
+        if (bstarts(resp->location, "http://")) {
+            bcpy(b->url, resp->location, BROWSER_URL_MAX);
+            b->url_len = blen(b->url);
+            http_free(resp);
+            /* A bounded recursive follow prevents redirect loops. */
+            browser_fetch_depth(b, redirect_depth + 1);
+            return;
+        }
+        bcpy(b->status, "Redirect target unsupported", 80);
         b->state = BSTATE_ERROR;
         http_free(resp);
         return;
@@ -210,12 +345,20 @@ static void browser_fetch(browser_app_t *b) {
     }
 
     /* Strip HTML and store text */
+    b->html_len = (resp->body_len < BROWSER_HTML_MAX - 1) ?
+                  (int)resp->body_len : BROWSER_HTML_MAX - 1;
+    for (int i = 0; i < b->html_len; i++) b->html[i] = (char)resp->body[i];
+    b->html[b->html_len] = 0;
     b->text_len = html_strip(resp->body, (int)resp->body_len,
                               b->text, BROWSER_BUF_MAX);
     b->state = BSTATE_DONE;
     /* Status: "200 OK — hostname" */
     bcpy(b->status, "200 OK", 80);
     http_free(resp);
+}
+
+static void browser_fetch(browser_app_t *b) {
+    browser_fetch_depth(b, 0);
 }
 
 /* ── Draw content area ───────────────────────────────────────────────────── */
@@ -255,7 +398,13 @@ static void browser_draw_content(browser_app_t *b, int bx, int by,
         return;
     }
 
-    /* BSTATE_DONE — render text */
+    /* BSTATE_DONE — render structured HTML when available. */
+    if (b->html_len > 0) {
+        html_render(b, bx, by, bw, bh);
+        return;
+    }
+
+    /* Plain text fallback */
     int max_col   = (bw - 18) / 8;
     int vis_rows  = bh / 16;
     int line      = 0;

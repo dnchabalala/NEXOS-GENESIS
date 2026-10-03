@@ -3,7 +3,8 @@
  * Hardware-backed RTL8139 Ethernet driver. Transmit uses the 4-descriptor
  * round-robin and receive is drained from the PCI IRQ, with polling retained
  * for synchronous protocol waits.
- * Physical address == virtual address because heap is in the 32 MB identity map.
+ * Physical address == virtual address because early boot identity-maps the
+ * kernel image and the first 2 GB. DMA receive storage is static, not heap.
  */
 #include "rtl8139.h"
 #include "../kernel.h"
@@ -52,11 +53,14 @@ static int       rtl_detected  = 0;
 static uint32_t  rtl_iobase    = 0;
 static uint8_t   rtl_mac[6]    = {0};
 static uint8_t  *rtl_rx_buf    = NULL;
+static uint8_t   rtl_rx_storage[RTL_RX_BUF_SIZE + 1536]
+                 __attribute__((aligned(16)));
 static uint8_t  *rtl_tx_buf[RTL_TX_DESC_CNT];
 static int       rtl_tx_slot   = 0;
 static uint16_t  rtl_rx_ptr    = 0;   /* software read pointer into ring */
 static uint32_t  rtl_rx_count  = 0;
 static uint32_t  rtl_tx_count  = 0;
+static volatile int rtl_rx_pending = 0;
 
 /* Registered receive callback (set by callers that want to inspect packets) */
 static void (*rtl_rx_callback)(const uint8_t *pkt, uint16_t len) = NULL;
@@ -68,7 +72,9 @@ void rtl8139_set_rx_callback(void (*cb)(const uint8_t *, uint16_t)) {
 static void rtl8139_irq_handler(registers_t *regs) {
     (void)regs;
     if (!rtl_detected) return;
-    rtl8139_receive();
+    /* Do not run Ethernet/IP/ARP or allocate memory in IRQ context.  The
+     * GUI and shell can be inside kmalloc when an RX interrupt arrives. */
+    rtl_rx_pending = 1;
     uint16_t status = io_inw(rtl_iobase + RTL_ISR);
     if (status) io_outw(rtl_iobase + RTL_ISR, status);
 }
@@ -138,8 +144,9 @@ int rtl8139_init(void) {
          rtl_mac[3], rtl_mac[4], rtl_mac[5]);
 
     /* ── 3B: RX ring buffer ─────────────────────────────────────────────── */
-    rtl_rx_buf = (uint8_t *)kmalloc(RTL_RX_BUF_SIZE);
-    if (!rtl_rx_buf) { klog(LOG_ERROR, "RTL8139: cannot allocate RX buffer"); return -1; }
+    /* Keep DMA writes away from heap metadata. The extra tail absorbs any
+       controller wrap/CRC writes beyond the logical 32 KB ring. */
+    rtl_rx_buf = rtl_rx_storage;
     rtl_mem_zero(rtl_rx_buf, RTL_RX_BUF_SIZE);
     rtl_rx_ptr = 0;
 
@@ -235,14 +242,16 @@ int rtl8139_send(const uint8_t *data, uint16_t len) {
 void rtl8139_receive(void) {
     if (!rtl_detected) return;
 
-    while (!(io_inb(rtl_iobase + RTL_CR) & CR_BUFE)) {
+    /* A damaged RX header must not trap the shell in an infinite drain loop. */
+    int packets = 0;
+    while (!(io_inb(rtl_iobase + RTL_CR) & CR_BUFE) && packets++ < 64) {
         /* RX packet header is 4 bytes: [16-bit status][16-bit length] */
         uint32_t offset = rtl_rx_ptr & 0x7FFF; /* 32 KB mask */
         uint32_t hdr    = *(uint32_t *)(rtl_rx_buf + offset);
         uint16_t status = (uint16_t)(hdr & 0xFFFF);
         uint16_t rxlen  = (uint16_t)(hdr >> 16);   /* includes 4-byte CRC */
 
-        if (!(status & 0x0001) || rxlen < 4) {
+        if (!(status & 0x0001) || rxlen < 4 || rxlen > 1536 + 4) {
             /* Not ROK — reset ring pointer to CBR */
             rtl_rx_ptr = io_inw(rtl_iobase + RTL_CBR);
             io_outw(rtl_iobase + RTL_CAPR, rtl_rx_ptr - 0x10);
@@ -284,6 +293,19 @@ void rtl8139_receive(void) {
 
         /* Acknowledge interrupt */
         io_outw(rtl_iobase + RTL_ISR, ISR_ROK);
+    }
+
+    if (packets >= 64) {
+        rtl_rx_ptr = io_inw(rtl_iobase + RTL_CBR);
+        io_outw(rtl_iobase + RTL_CAPR, rtl_rx_ptr - 0x10);
+    }
+}
+
+void rtl8139_service(void) {
+    if (!rtl_detected) return;
+    if (rtl_rx_pending || !(io_inb(rtl_iobase + RTL_CR) & CR_BUFE)) {
+        rtl_rx_pending = 0;
+        rtl8139_receive();
     }
 }
 

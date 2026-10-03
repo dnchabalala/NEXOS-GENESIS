@@ -119,7 +119,7 @@ void pmm_print_map(void) {
     klog(LOG_INFO, "  0x00000000 - 0x000FFFFF  [BIOS/reserved]   1 MB");
     klog(LOG_INFO, "  0x00100000 - 0x011FFFFF  [kernel+static]  17 MB");
     klog(LOG_INFO, "  0x01200000 - 0x019FFFFF  [heap]            8 MB");
-    klog(LOG_INFO, "  0x01A00000 - 0x%08x  [free RAM]     %llu MB",
+    klog(LOG_INFO, "  0x01A00000 - 0x%08x  [free RAM/usable map] %llu MB",
          (uint32_t)(total - 1), free_ram);
     klog(LOG_INFO, "  Free: %llu frames (%llu KB)",
          pmm_free_pages, pmm_free_pages * (PAGE_SIZE / 1024));

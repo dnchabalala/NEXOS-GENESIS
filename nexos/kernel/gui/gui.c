@@ -20,6 +20,7 @@
 #include "../drivers/fb.h"
 #include "../drivers/font.h"
 #include "../drivers/mouse.h"
+#include "../drivers/rtl8139.h"
 #include "../drivers/keyboard.h"
 #include "../drivers/timer.h"
 #include "../kernel.h"
@@ -160,6 +161,10 @@ void gui_main(void) {
 
     while (1) {
         uint64_t now = timer_get_ticks();
+
+        /* Process NIC packets outside interrupt context.  The RTL8139 IRQ
+         * only marks RX work pending because the network stack allocates. */
+        rtl8139_service();
 
         /* ── Keyboard events ────────────────────────────────────────────── */
         while (keyboard_available()) {

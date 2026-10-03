@@ -11,7 +11,7 @@ VM_DIR="$ROOT_DIR/build/vms/NexOS-VMware"
 VMX="$VM_DIR/nexos.vmx"
 VMDK="$VM_DIR/nexos.vmdk"
 DISK_GB="${DISK_GB:-8}"
-MEM_MB="${MEM_MB:-512}"
+MEM_MB="${MEM_MB:-2048}"
 
 if [ ! -f "$ISO" ]; then
     echo "[vmware] Error: ISO not found at $ISO"

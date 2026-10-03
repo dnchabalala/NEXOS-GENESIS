@@ -25,10 +25,12 @@ typedef struct heap_block {
 } heap_block_t;
 
 static heap_block_t *heap_head = NULL;
+static uint8_t      *heap_start = NULL;
 static uint8_t      *heap_end  = NULL;
 
 void heap_init(void *start, size_t size) {
     heap_head = (heap_block_t *)start;
+    heap_start = (uint8_t *)start;
     heap_head->size = size - sizeof(heap_block_t);
     heap_head->free = 1;
     heap_head->next = NULL;
@@ -80,12 +82,36 @@ void *kmalloc(size_t size) {
 
 void kfree(void *ptr) {
     if (!ptr) return;
+    uint8_t *p = (uint8_t *)ptr;
+    if (!heap_start || p < heap_start + sizeof(heap_block_t) || p >= heap_end) {
+        klog(LOG_ERROR, "Heap: rejecting invalid free pointer %p", ptr);
+        return;
+    }
     heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - sizeof(heap_block_t));
+    uint8_t *data_end = (uint8_t *)block + sizeof(heap_block_t);
+    if (block->size > (size_t)(heap_end - data_end)) {
+        klog(LOG_ERROR, "Heap: corrupted block size at %p", block);
+        return;
+    }
+    if (block->free) {
+        klog(LOG_ERROR, "Heap: double free at %p", ptr);
+        return;
+    }
     block->free = 1;
     /* Forward coalesce only — avoids double-merge corruption from prev ptr */
-    if (block->next && block->next->free) {
-        block->size += sizeof(heap_block_t) + block->next->size;
-        block->next  = block->next->next;
+    if (block->next) {
+        uint8_t *next_addr = (uint8_t *)block->next;
+        uint8_t *min_next = data_end + block->size;
+        if (next_addr < min_next ||
+            next_addr > heap_end - sizeof(heap_block_t)) {
+            klog(LOG_ERROR, "Heap: corrupted next pointer at %p", block);
+            block->next = NULL;
+            return;
+        }
+        if (block->next->free) {
+            block->size += sizeof(heap_block_t) + block->next->size;
+            block->next  = block->next->next;
+        }
     }
 }
 

@@ -6,7 +6,7 @@ ISO="$ROOT_DIR/build/nexos.iso"
 DISK="$ROOT_DIR/build/nexos.img"
 
 DISPLAY_MODE="${DISPLAY_MODE:-sdl}"
-MEMORY="${MEMORY:-256}"
+MEMORY="${MEMORY:-2048}"
 
 QEMU_CMD="qemu-system-x86_64"
 QEMU_ARGS=(

@@ -5,6 +5,9 @@
 #include <stdint.h>
 
 #define TCP_RX_BUF_SIZE  8192
+#define TCP_MSS          1460
+#define TCP_MAX_CONNECTIONS 8
+#define TCP_MAX_OOO      4
 
 #define TCP_STATE_CLOSED      0
 #define TCP_STATE_SYN_SENT    1
@@ -19,14 +22,31 @@
 #define TCP_FLAG_ACK  0x10
 
 typedef struct {
+    uint32_t seq;
+    uint16_t len;
+    uint8_t  used;
+    uint8_t  data[TCP_MSS];
+} tcp_ooo_t;
+
+typedef struct {
     uint32_t remote_ip;
     uint16_t remote_port;
     uint16_t local_port;
-    uint32_t seq;
-    uint32_t ack;
-    int      state;
-    uint8_t  rx_buf[TCP_RX_BUF_SIZE];
+    uint32_t seq;             /* next sequence number to allocate */
+    uint32_t ack;             /* next byte expected from peer */
+    uint32_t rx_next;
+    uint16_t remote_window;
     uint16_t rx_len;
+    uint8_t  state;
+    uint8_t  fin_sent;
+    uint8_t  tx_inflight;
+    uint8_t  tx_retries;
+    uint32_t tx_seq;
+    uint16_t tx_len;
+    uint64_t tx_deadline;
+    uint8_t  tx_buf[TCP_MSS];
+    uint8_t  rx_buf[TCP_RX_BUF_SIZE];
+    tcp_ooo_t ooo[TCP_MAX_OOO];
 } tcp_conn_t;
 
 /* Open TCP connection. conn is caller-allocated (use static or kmalloc).

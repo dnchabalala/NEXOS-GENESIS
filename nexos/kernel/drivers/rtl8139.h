@@ -13,6 +13,7 @@ int  rtl8139_found(void);
 void rtl8139_get_mac(uint8_t mac[6]);
 int  rtl8139_send(const uint8_t *data, uint16_t len);
 void rtl8139_receive(void);          /* poll & drain RX ring */
+void rtl8139_service(void);          /* safe-context receive service */
 void rtl8139_set_rx_callback(void (*cb)(const uint8_t *pkt, uint16_t len));
 void rtl8139_arp_reply(const uint8_t *req_pkt);
 uint32_t rtl8139_get_rx_count(void);

@@ -1,0 +1,16 @@
+# NetSurf/NexOS first-milestone source lock, generated 2026-10-03.
+# Format: repository name|git URL|commit|required-by-default
+buildsystem|https://github.com/netsurf-browser/buildsystem.git|0005ae300283ff01c2e2b05e7376b3e55dea21f7|yes
+libwapcaplet|https://github.com/netsurf-browser/libwapcaplet.git|c7c128d3eb3223b216c974471f82e9337fbcf4ba|yes
+libparserutils|https://github.com/netsurf-browser/libparserutils.git|6b0cbf086ca8eb8fe74b69f0c9ecf274eb2397ca|yes
+libhubbub|https://github.com/netsurf-browser/libhubbub.git|6651b8cf87a4aa87bcdb2ff024a02659cd3f9402|yes
+libdom|https://github.com/netsurf-browser/libdom.git|f69781e1f062444b5af3f62d431d7d94018da53b|yes
+libcss|https://github.com/netsurf-browser/libcss.git|499f1c4601ad39942fd1b2204053a387bec9b989|yes
+libnsutils|https://github.com/netsurf-browser/libnsutils.git|0bd39060740b6163bd50875326654a722df97eb2|yes
+libnsfb|https://github.com/netsurf-browser/libnsfb.git|b701cdce7241c3747ccd78658a365db0983ebe24|yes
+netsurf|https://github.com/netsurf-browser/netsurf.git|39da3c3a40af4566d86500ff3052dfdc7f9a0378|yes
+libsvgtiny|https://github.com/netsurf-browser/libsvgtiny.git|073283b29dd800e4d938db42af7e131db848bf3b|no-svg-disabled
+libnsgif|https://github.com/netsurf-browser/libnsgif.git|22e99eb6818b1284d0f3ff1b7f46159e87221220|no-gif-disabled
+libnsbmp|https://github.com/netsurf-browser/libnsbmp.git|ea063c9f46acb43e90208da14073332b505ef7e7|no-bmp-disabled
+libnspsl|https://github.com/netsurf-browser/libnspsl.git|82815c2bc7fd70d1b6afccfa89a9a0f3fa73db8a|no-optional
+libnslog|https://github.com/netsurf-browser/libnslog.git|bedff2146270a8a73cc265bab46ec39f9c170d07|no-optional
