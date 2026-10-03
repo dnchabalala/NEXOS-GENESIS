@@ -20,6 +20,7 @@
 #include "../kernel.h"
 #include "../mm/heap.h"
 #include "../mm/pmm.h"
+#include "../mm/vmm.h"
 #include "../arch/x86_64/gdt.h"
 #include "../arch/x86_64/paging.h"
 
@@ -287,7 +288,7 @@ int proc_wait(uint32_t pid) {
     process_t *p = proc_get_by_pid(pid);
     while (p && p->state != PROC_ZOMBIE) {
         // Yield or something, but for now, just loop
-        asm volatile ("hlt");
+        __asm__ volatile ("hlt");
     }
     if (p) {
         int code = p->exit_code;

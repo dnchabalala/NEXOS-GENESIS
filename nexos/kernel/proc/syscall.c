@@ -1475,7 +1475,9 @@ uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3,
         uint32_t *r = (uint32_t *)(uintptr_t)a1;
         uint32_t *e = (uint32_t *)(uintptr_t)a2;
         uint32_t *s = (uint32_t *)(uintptr_t)a3;
-        if (r) *r = 0; if (e) *e = 0; if (s) *s = 0;
+        if (r) *r = 0;
+        if (e) *e = 0;
+        if (s) *s = 0;
         return 0;
     }
 
@@ -1484,7 +1486,9 @@ uint64_t syscall_dispatch(uint64_t num, uint64_t a1, uint64_t a2, uint64_t a3,
         uint32_t *r = (uint32_t *)(uintptr_t)a1;
         uint32_t *e = (uint32_t *)(uintptr_t)a2;
         uint32_t *s = (uint32_t *)(uintptr_t)a3;
-        if (r) *r = 0; if (e) *e = 0; if (s) *s = 0;
+        if (r) *r = 0;
+        if (e) *e = 0;
+        if (s) *s = 0;
         return 0;
     }
 

@@ -4,6 +4,7 @@
 #include "../fs/vfs.h"
 #include "../mm/vmm.h"
 #include "../mm/pmm.h"
+#include "../mm/heap.h"
 #include <stdint.h>
 #include <stddef.h>
 

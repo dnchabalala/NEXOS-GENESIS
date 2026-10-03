@@ -206,6 +206,10 @@ void gui_main(void) {
         }
 
         /* ── Mouse events ───────────────────────────────────────────────── */
+        /* Advance the smoothed position from the IRQ-updated target before
+         * hit-testing and drawing.  Without this call the software cursor
+         * remained at its initial position forever. */
+        mouse_needs_update();
         int mx    = mouse_get_x();
         int my    = mouse_get_y();
         int left  = mouse_left();

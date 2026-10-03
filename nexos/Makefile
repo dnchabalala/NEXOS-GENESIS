@@ -69,6 +69,7 @@ KERNEL_C_SOURCES = \
         $(KERNEL)/net/icmp.c \
         $(KERNEL)/net/udp.c \
         $(KERNEL)/net/dns.c \
+        $(KERNEL)/net/dhcp.c \
         $(KERNEL)/net/tcp.c \
         $(KERNEL)/net/http.c \
         $(USER)/init/init.c \
@@ -118,7 +119,7 @@ DISK_IMG = $(BUILD)/nexos_disk.img
 
 all: kernel iso
 
-kernel: $(KERNEL_ELF)
+kernel: check-host-tools $(KERNEL_ELF)
 
 iso: kernel
 	@chmod +x $(TOOLS)/build_iso.sh
@@ -173,6 +174,12 @@ run-vmware: iso
 check:
 	$(CC) $(CFLAGS) -fsyntax-only $(KERNEL_C_SOURCES)
 	@echo "Syntax check passed."
+
+check-host-tools:
+	@command -v $(ASM) >/dev/null 2>&1 || \
+		{ echo "Missing host tool: $(ASM) (required to assemble the kernel)." >&2; exit 127; }
+	@command -v $(PYTHON) >/dev/null 2>&1 || \
+		{ echo "Missing host tool: $(PYTHON)." >&2; exit 127; }
 
 clean:
 	rm -rf $(BUILD)

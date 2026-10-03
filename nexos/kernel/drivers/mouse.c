@@ -7,14 +7,14 @@
 void irq_install_handler(int irq, void (*handler)(registers_t *));
 
 /* ── PS/2 state ────────────────────────────────────────────────────────── */
-static int     mouse_x;
-static int     mouse_y;
-static int     mouse_tx;
-static int     mouse_ty;
-static uint8_t mouse_btns;
-static uint8_t mouse_cycle;
+static volatile int     mouse_x;
+static volatile int     mouse_y;
+static volatile int     mouse_tx;
+static volatile int     mouse_ty;
+static volatile uint8_t mouse_btns;
+static volatile uint8_t mouse_cycle;
 static uint8_t mouse_bytes[3];
-static int     mouse_needs_redraw = 0;
+static volatile int mouse_needs_redraw = 0;
 
 /* ── Cursor ─────────────────────────────────────────────────────────────── */
 #define CUR_W 12
@@ -120,17 +120,31 @@ int     mouse_get_y(void)    { return mouse_y; }
 uint8_t mouse_get_btns(void) { return mouse_btns; }
 int     mouse_left(void)     { return mouse_btns & 1; }
 int     mouse_right(void)    { return mouse_btns & 2; }
-int     mouse_needs_update(void) {
+int mouse_needs_update(void) {
+    int changed = 0;
+
+    /* Move both axes every poll.  The old one-axis-at-a-time update made
+     * diagonal motion lag and stalled forever when the remaining delta was
+     * one pixel because integer division rounded the step to zero. */
     if (mouse_x != mouse_tx) {
-        mouse_x += (mouse_tx - mouse_x) / 2;
-        if (mouse_x == mouse_tx) mouse_needs_redraw = 1;
-        return 1;
+        int delta = mouse_tx - mouse_x;
+        int step = delta / 2;
+        if (step == 0) step = (delta > 0) ? 1 : -1;
+        mouse_x += step;
+        if ((step > 0 && mouse_x > mouse_tx) ||
+            (step < 0 && mouse_x < mouse_tx)) mouse_x = mouse_tx;
+        changed = 1;
     }
     if (mouse_y != mouse_ty) {
-        mouse_y += (mouse_ty - mouse_y) / 2;
-        if (mouse_y == mouse_ty) mouse_needs_redraw = 1;
-        return 1;
+        int delta = mouse_ty - mouse_y;
+        int step = delta / 2;
+        if (step == 0) step = (delta > 0) ? 1 : -1;
+        mouse_y += step;
+        if ((step > 0 && mouse_y > mouse_ty) ||
+            (step < 0 && mouse_y < mouse_ty)) mouse_y = mouse_ty;
+        changed = 1;
     }
+    if (changed) return 1;
     if (mouse_needs_redraw) { mouse_needs_redraw = 0; return 1; }
     return 0;
 }

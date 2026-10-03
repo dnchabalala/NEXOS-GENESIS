@@ -32,6 +32,11 @@ static void npkg_strcpy(char *d, const char *s, int max) {
 static void npkg_strncpy(char *d, const char *s, int n) {
     int i = 0; while (i < n && s[i]) { d[i] = s[i]; i++; } d[i] = 0;
 }
+static void npkg_memcpy(void *dst, const void *src, size_t n) {
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    for (size_t i = 0; i < n; i++) d[i] = s[i];
+}
 static int npkg_strcmp(const char *a, const char *b) {
     while (*a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
@@ -52,12 +57,6 @@ static void npkg_itoa(int v, char *buf) {
 static void npkg_append_int(char *buf, int buf_size, int v) {
     char tmp[16]; npkg_itoa(v, tmp);
     npkg_strcat(buf, tmp, buf_size);
-}
-/* Return pointer past '\n' or to '\0' */
-static const char *npkg_next_line(const char *p) {
-    while (*p && *p != '\n') p++;
-    if (*p == '\n') p++;
-    return p;
 }
 /* Copy up to '\n' or '\0' into out, return pointer to next line */
 static const char *npkg_read_line(const char *p, char *out, int max) {
@@ -156,7 +155,8 @@ static void npkg_db_add(const npkg_header_t *h) {
 }
 
 static void npkg_db_del(int idx) {
-    for (int i = idx; i < db_count - 1; i++) db[i] = db[i + 1];
+    for (int i = idx; i < db_count - 1; i++)
+        npkg_memcpy(&db[i], &db[i + 1], sizeof(db[i]));
     db_count--;
     db_dirty = 1;
 }

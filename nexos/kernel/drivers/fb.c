@@ -217,16 +217,27 @@ uint32_t fb_blend(uint32_t fg, uint32_t bg, uint8_t alpha) {
 
 void fb_copy_rect(int sx, int sy, int dx, int dy, int w, int h) {
     if (w <= 0 || h <= 0) return;
+    /* Clip the complete source/destination rectangle before forming row
+     * pointers.  The old code formed pointers before checking negative
+     * coordinates, which is undefined behavior and can corrupt the
+     * framebuffer when a window animation crosses an edge. */
+    if (sx < 0) { int n = -sx; sx += n; dx += n; w -= n; }
+    if (dx < 0) { int n = -dx; sx += n; dx += n; w -= n; }
+    if (sy < 0) { int n = -sy; sy += n; dy += n; h -= n; }
+    if (dy < 0) { int n = -dy; sy += n; dy += n; h -= n; }
+    if (sx + w > (int)fb.width)  w = (int)fb.width - sx;
+    if (dx + w > (int)fb.width)  w = (int)fb.width - dx;
+    if (sy + h > (int)fb.height) h = (int)fb.height - sy;
+    if (dy + h > (int)fb.height) h = (int)fb.height - dy;
+    if (w <= 0 || h <= 0) return;
+
     for (int row = 0; row < h; row++) {
         int srow = sy + row, drow = dy + row;
-        if ((unsigned)srow >= fb.height || (unsigned)drow >= fb.height) continue;
-        uint32_t *s = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)srow * fb.pitch) + sx;
-        uint32_t *d = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)drow * fb.pitch) + dx;
-        for (int col = 0; col < w; col++) {
-            if ((unsigned)(sx + col) >= fb.width)  continue;
-            if ((unsigned)(dx + col) >= fb.width)  continue;
-            d[col] = s[col];
-        }
+        uint32_t *s = (uint32_t *)((uint8_t *)fb.addr +
+                                   (uint32_t)srow * fb.pitch) + sx;
+        uint32_t *d = (uint32_t *)((uint8_t *)fb.addr +
+                                   (uint32_t)drow * fb.pitch) + dx;
+        for (int col = 0; col < w; col++) d[col] = s[col];
     }
 }
 

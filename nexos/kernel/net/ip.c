@@ -22,8 +22,8 @@ static uint16_t ip_checksum(const uint8_t *buf, int len) {
 int ip_send(uint32_t dest_ip, uint8_t protocol,
             const uint8_t *payload, uint16_t plen) {
     uint8_t dest_mac[6];
-    /* Route: send to gateway if not on our /24 */
-    uint32_t next_hop = ((dest_ip ^ eth_our_ip) & 0xFFFFFF00U)
+    /* Route using the mask obtained from DHCP, not a hard-coded /24. */
+    uint32_t next_hop = ((dest_ip ^ eth_our_ip) & eth_netmask)
                         ? eth_gw_ip : dest_ip;
     if (!arp_request(next_hop, dest_mac)) {
         klog(LOG_WARN, "IP: ARP failed for %d.%d.%d.%d",
@@ -71,7 +71,11 @@ void ip_receive(const uint8_t *data, uint16_t len) {
     if (len < IP_HDR_LEN) return;
     uint8_t ihl      = (uint8_t)((data[0] & 0x0F) * 4);
     uint8_t protocol = data[9];
-    if (len < ihl) return;
+    if ((data[0] >> 4) != 4 || ihl < IP_HDR_LEN || len < ihl) return;
+
+    uint16_t total = (uint16_t)((data[2] << 8) | data[3]);
+    if (total < ihl || total > len) return;
+    len = total;
 
     /* Extract source IP for dispatch (ARP cache is already populated by the
      * Ethernet → ARP layer before we get here; the Ethernet src MAC is not
@@ -82,7 +86,7 @@ void ip_receive(const uint8_t *data, uint16_t len) {
     /* Verify destination is us */
     uint32_t dst_ip = ((uint32_t)data[16] << 24) | ((uint32_t)data[17] << 16)
                      | ((uint32_t)data[18] <<  8) |  data[19];
-    if (dst_ip != eth_our_ip) return;
+    if (dst_ip != eth_our_ip && dst_ip != 0xFFFFFFFFU) return;
 
     const uint8_t *payload = data + ihl;
     uint16_t plen = (uint16_t)(len - ihl);

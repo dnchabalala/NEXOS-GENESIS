@@ -9,10 +9,12 @@
 #define ETH_TYPE_ARP  0x0806
 #define ETH_TYPE_IP   0x0800
 
-/* Our static QEMU user-net addresses (stored as big-endian uint32_t) */
+/* Active Ethernet configuration, stored as big-endian uint32_t values. */
 extern uint8_t  eth_our_mac[ETH_ADDR_LEN];
-extern uint32_t eth_our_ip;   /* 10.0.2.15 = 0x0A00020F */
-extern uint32_t eth_gw_ip;    /* 10.0.2.2  = 0x0A000202 */
+extern uint32_t eth_our_ip;
+extern uint32_t eth_netmask;
+extern uint32_t eth_gw_ip;
+extern uint32_t eth_dns_ip;
 
 void ethernet_init(void);
 int  ethernet_send(const uint8_t dst_mac[ETH_ADDR_LEN], uint16_t ethertype,

@@ -5,6 +5,7 @@
 #include "icmp.h"
 #include "udp.h"
 #include "tcp.h"
+#include "dhcp.h"
 #include "../kernel.h"
 #include "../drivers/rtl8139.h"
 
@@ -24,14 +25,23 @@ void net_init(void) {
 
     /* ── Layer 2: wire Ethernet RX callback, read MAC ─────────────────────── */
     ethernet_init();
-    klog(LOG_INFO, "eth0  10.0.2.15/24  gw 10.0.2.2");
+    if (dhcp_configure() < 0) {
+        klog(LOG_WARN, "net: DHCP failed; Ethernet link is up but has no IPv4 configuration");
+        return;
+    }
+
+    klog(LOG_INFO, "eth0  %d.%d.%d.%d  gw %d.%d.%d.%d",
+         (eth_our_ip >> 24) & 255, (eth_our_ip >> 16) & 255,
+         (eth_our_ip >> 8) & 255, eth_our_ip & 255,
+         (eth_gw_ip >> 24) & 255, (eth_gw_ip >> 16) & 255,
+         (eth_gw_ip >> 8) & 255, eth_gw_ip & 255);
 
     /* ── Layer 3/ARP: resolve gateway so we can route IP packets ─────────── */
     uint8_t gw_mac[6] = {0};
-    klog(LOG_INFO, "ARP: probing gateway 10.0.2.2 ...");
+    klog(LOG_INFO, "ARP: probing configured gateway...");
     if (arp_request(eth_gw_ip, gw_mac)) {
         klog(LOG_INFO,
-             "ARP: 10.0.2.2 -> %02x:%02x:%02x:%02x:%02x:%02x",
+             "ARP: gateway -> %02x:%02x:%02x:%02x:%02x:%02x",
              gw_mac[0], gw_mac[1], gw_mac[2],
              gw_mac[3], gw_mac[4], gw_mac[5]);
     } else {
@@ -40,13 +50,13 @@ void net_init(void) {
     }
 
     /* ── ICMP: send one echo to verify IP reachability ───────────────────── */
-    klog(LOG_INFO, "ICMP: ping 10.0.2.2 ...");
+    klog(LOG_INFO, "ICMP: pinging configured gateway...");
     int rtt = icmp_send_echo(eth_gw_ip);
     if (rtt >= 0)
-        klog(LOG_INFO, "ICMP: reply from 10.0.2.2 in %d ms — IP layer OK", rtt);
+        klog(LOG_INFO, "ICMP: gateway reply in %d ms — IP layer OK", rtt);
     else
-        klog(LOG_WARN, "ICMP: no reply from 10.0.2.2 (gateway unreachable)");
+        klog(LOG_WARN, "ICMP: no reply from gateway (unreachable)");
 
-    klog(LOG_INFO, "Network stack ready: Ethernet / ARP / IPv4 / ICMP / "
+    klog(LOG_INFO, "Network stack ready: Ethernet / DHCP / ARP / IPv4 / ICMP / "
                    "UDP / TCP / DNS / HTTP");
 }

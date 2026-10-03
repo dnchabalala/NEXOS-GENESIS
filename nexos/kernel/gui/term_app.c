@@ -82,20 +82,24 @@ void term_printf(term_app_t *t, const char *fmt, ...) {
             char t2[20]; int ti = 0;
             do { t2[ti++] = '0' + (int)(v % 10); v /= 10; } while (v);
             while (ti < kw && bi < 510) { buf[bi++] = kp; kw--; }
-            while (ti > 0 && bi < 510) buf[bi++] = t2[--ti]; break; }
+            while (ti > 0 && bi < 510) buf[bi++] = t2[--ti];
+            break; }
         case 'u': { uint64_t v = va_arg(ap, uint64_t);
             char t2[20]; int ti = 0;
             do { t2[ti++] = '0' + (int)(v % 10); v /= 10; } while (v);
             while (ti < kw && bi < 510) { buf[bi++] = kp; kw--; }
-            while (ti > 0 && bi < 510) buf[bi++] = t2[--ti]; break; }
+            while (ti > 0 && bi < 510) buf[bi++] = t2[--ti];
+            break; }
         case 'x': { uint64_t v = va_arg(ap, uint64_t);
             const char *hx = "0123456789abcdef"; char t2[16]; int ti = 0;
             do { t2[ti++] = hx[v & 0xF]; v >>= 4; } while (v);
             while (ti < kw && bi < 510) { buf[bi++] = kp; kw--; }
-            while (ti > 0 && bi < 510) buf[bi++] = t2[--ti]; break; }
+            while (ti > 0 && bi < 510) buf[bi++] = t2[--ti];
+            break; }
         case 's': { const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
-            while (*s && bi < 510) buf[bi++] = *s++; break; }
+            while (*s && bi < 510) buf[bi++] = *s++;
+            break; }
         case '%': buf[bi++] = '%'; break;
         default:  buf[bi++] = '%'; buf[bi++] = *fmt; break;
         }

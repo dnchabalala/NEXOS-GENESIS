@@ -7,8 +7,10 @@
 #include "../mm/heap.h"
 
 uint8_t  eth_our_mac[ETH_ADDR_LEN] = {0};
-uint32_t eth_our_ip  = 0x0A00020F;   /* 10.0.2.15 */
-uint32_t eth_gw_ip   = 0x0A000202;   /* 10.0.2.2  */
+uint32_t eth_our_ip  = 0;
+uint32_t eth_netmask = 0;
+uint32_t eth_gw_ip   = 0;
+uint32_t eth_dns_ip  = 0;
 
 void ethernet_init(void) {
     rtl8139_get_mac(eth_our_mac);

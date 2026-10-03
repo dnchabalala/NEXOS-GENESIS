@@ -4,8 +4,8 @@
 #include "../kernel.h"
 #include "../drivers/rtl8139.h"
 #include "../drivers/timer.h"
+#include "ethernet.h"
 
-#define DNS_SERVER    0x0A000203U   /* 10.0.2.3 (QEMU NAT DNS) */
 #define DNS_PORT      53
 #define DNS_SRC_PORT  1053
 #define DNS_TIMEOUT   3000          /* ms */
@@ -102,7 +102,7 @@ int dns_resolve(const char *hostname, uint8_t ip_out[4]) {
     udp_register(DNS_SRC_PORT, dns_udp_handler);
 
     klog(LOG_INFO, "DNS: querying %s ...", hostname);
-    if (udp_send(DNS_SERVER, DNS_SRC_PORT, DNS_PORT,
+    if (!eth_dns_ip || udp_send(eth_dns_ip, DNS_SRC_PORT, DNS_PORT,
                  pkt, (uint16_t)pos) < 0) {
         udp_unregister(DNS_SRC_PORT);
         klog(LOG_WARN, "DNS: send failed");

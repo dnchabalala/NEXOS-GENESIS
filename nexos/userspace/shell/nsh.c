@@ -997,8 +997,21 @@ static int cmd_ifconfig(int argc, char *argv[]) {
         nsh_print(nif->name);
         nsh_print(": flags=UP,BROADCAST,RUNNING  mtu 1500");
         nsh_println("");
-        nsh_println("        inet 10.0.2.15  netmask 255.255.255.0  broadcast 10.0.2.255");
-        nsh_println("        gateway 10.0.2.2");
+        nsh_print("        inet ");
+        nsh_uint_str((eth_our_ip >> 24) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str((eth_our_ip >> 16) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str((eth_our_ip >> 8) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str(eth_our_ip & 255, buf); nsh_print(buf);
+        nsh_print("  netmask ");
+        nsh_uint_str((eth_netmask >> 24) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str((eth_netmask >> 16) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str((eth_netmask >> 8) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str(eth_netmask & 255, buf); nsh_print(buf);
+        nsh_print("  gateway ");
+        nsh_uint_str((eth_gw_ip >> 24) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str((eth_gw_ip >> 16) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str((eth_gw_ip >> 8) & 255, buf); nsh_print(buf); nsh_putchar('.');
+        nsh_uint_str(eth_gw_ip & 255, buf); nsh_println(buf);
         nsh_print  ("        ether ");
         for (int i = 0; i < 6; i++) {
             print_hex_byte(nif->mac[i]);
@@ -1512,8 +1525,6 @@ static int nsh_exec_builtin(int argc, char *argv[]) {
                                        { launch_filemanager();return 0; }
         if (nsh_strcmp(cmd,"sysinfo")==0)
                                        { launch_sysinfo();    return 0; }
-    }
-
     }
 
     /* ── Try to exec ELF binary from /bin/<cmd> ── */

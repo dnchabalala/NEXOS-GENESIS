@@ -1,7 +1,8 @@
 /* NexOS — kernel/drivers/rtl8139.c | RTL8139 NIC driver | MIT License
  *
- * Polling-based (no IRQ wired).  Transmit uses the 4-descriptor round-robin.
- * Receive drains the 32 KB+16 ring on demand (called from shell ping/ifconfig).
+ * Hardware-backed RTL8139 Ethernet driver. Transmit uses the 4-descriptor
+ * round-robin and receive is drained from the PCI IRQ, with polling retained
+ * for synchronous protocol waits.
  * Physical address == virtual address because heap is in the 32 MB identity map.
  */
 #include "rtl8139.h"
@@ -9,6 +10,9 @@
 #include "../mm/heap.h"
 #include "../drivers/pci.h"
 #include "../net/netif.h"
+#include "../arch/x86_64/idt.h"
+
+void irq_install_handler(int irq, void (*handler)(registers_t *));
 
 /* ── RTL8139 register offsets (from I/O base) ──────────────────────────── */
 #define RTL_MAC0      0x00   /* MAC address bytes 0-5                       */
@@ -61,6 +65,14 @@ void rtl8139_set_rx_callback(void (*cb)(const uint8_t *, uint16_t)) {
     rtl_rx_callback = cb;
 }
 
+static void rtl8139_irq_handler(registers_t *regs) {
+    (void)regs;
+    if (!rtl_detected) return;
+    rtl8139_receive();
+    uint16_t status = io_inw(rtl_iobase + RTL_ISR);
+    if (status) io_outw(rtl_iobase + RTL_ISR, status);
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 static void rtl_mem_zero(void *p, size_t n) {
     uint8_t *b = (uint8_t *)p;
@@ -70,13 +82,6 @@ static void rtl_mem_copy(void *d, const void *s, size_t n) {
     uint8_t *dd = (uint8_t *)d;
     const uint8_t *ss = (const uint8_t *)s;
     for (size_t i = 0; i < n; i++) dd[i] = ss[i];
-}
-
-/* Memory barrier to ensure DMA coherency */
-static void rtl_io_wait(void) {
-    io_outb(0x80, 0);  /* POST port delay */
-    io_outb(0x80, 0);
-    io_outb(0x80, 0);
 }
 
 /* ── Initialisation ──────────────────────────────────────────────────────── */
@@ -140,6 +145,8 @@ int rtl8139_init(void) {
 
     /* Write physical address of RX buffer (identity mapped → phys == virt) */
     io_outl(rtl_iobase + RTL_RBSTART, (uint32_t)(uintptr_t)rtl_rx_buf);
+    /* CAPR is the last consumed byte minus 16; this starts both pointers at 0. */
+    io_outw(rtl_iobase + RTL_CAPR, 0xFFF0);
 
     /* IMR: enable ROK + TOK */
     io_outw(rtl_iobase + RTL_IMR, ISR_ROK | ISR_TOK);
@@ -155,6 +162,23 @@ int rtl8139_init(void) {
         /* Write physical TX address upfront */
         io_outl(rtl_iobase + RTL_TSAD0 + (uint32_t)(i * 4),
                 (uint32_t)(uintptr_t)rtl_tx_buf[i]);
+    }
+
+    /* Install the device's legacy PCI IRQ and unmask it on the PIC. */
+    uint32_t int_line = pci_read((uint8_t)found_bus, (uint8_t)found_dev,
+                                 (uint8_t)found_func, 0x3C) & 0xFF;
+    if (int_line < 16) {
+        irq_install_handler((int)int_line, rtl8139_irq_handler);
+        if (int_line < 8) {
+            io_outb(0x21, (uint8_t)(io_inb(0x21) & ~(1u << int_line)));
+        } else {
+            io_outb(0xA1, (uint8_t)(io_inb(0xA1) & ~(1u << (int_line - 8))));
+            io_outb(0x21, (uint8_t)(io_inb(0x21) & ~(1u << 2)));
+        }
+        klog(LOG_INFO, "RTL8139: IRQ%d receive handler installed", (int)int_line);
+    } else {
+        klog(LOG_WARN, "RTL8139: invalid PCI IRQ line %u; RX polling only",
+             (unsigned)int_line);
     }
 
     /* Enable TX + RX */
