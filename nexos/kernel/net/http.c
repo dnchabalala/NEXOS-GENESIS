@@ -6,12 +6,16 @@
 #include "../kernel.h"
 #include "../mm/heap.h"
 #include "../drivers/timer.h"
+#include "../../ports/tls/nexos_tls.h"
+#include "../../ports/tls/nexos_tls_tcp.h"
 
 #define HTTP_BUF_SIZE   (64 * 1024)   /* 64 KB response buffer */
 #define HTTP_RECV_MS    8000
 
 /* ── static TCP connection (one HTTP request at a time) ────────────────────  */
 static tcp_conn_t http_conn;
+extern const unsigned char nexos_tls_ca_start[];
+extern const unsigned char nexos_tls_ca_end[];
 
 /* ── string helpers ──────────────────────────────────────────────────────── */
 static void h_strcpy(char *d, const char *s, int max) {
@@ -36,9 +40,12 @@ static int h_atoi(const char *s) {
 static int parse_url(const char *url, char *host_out, int host_max,
                      uint16_t *port_out, char *path_out, int path_max) {
     const char *p = url;
-    /* This client is deliberately HTTP-only; never interpret another
-       scheme as a hostname (for example, "https://site" -> host "https"). */
-    if (h_strncmp(p, "https://", 8) == 0) return -2;
+    if (h_strncmp(p, "https://", 8) == 0) {
+        p += 8;
+        *port_out = 443;
+    } else {
+        *port_out = 80;
+    }
     if (h_strncmp(p, "http://", 7) == 0) p += 7;
 
     /* host[:port] ends at first '/' or end of string */
@@ -47,7 +54,6 @@ static int parse_url(const char *url, char *host_out, int host_max,
         host_out[hi++] = *p++;
     host_out[hi] = 0;
 
-    *port_out = 80;
     if (*p == ':') {
         p++;
         *port_out = (uint16_t)h_atoi(p);
@@ -198,12 +204,9 @@ http_response_t *http_get(const char *url) {
 
     int parse_result = parse_url(url, host, sizeof(host), &port,
                                  path, sizeof(path));
-    if (parse_result == -2) {
-        klog(LOG_WARN, "HTTP: HTTPS is not supported (TLS is unavailable)");
-        return 0;
-    }
     if (parse_result < 0)
         return 0;
+    int is_https = h_strncmp(url, "https://", 8) == 0;
 
     /* Resolve hostname */
     uint8_t host_ip[4];
@@ -241,30 +244,62 @@ http_response_t *http_get(const char *url) {
         return 0;
     }
 
+    nexos_tls_t tls;
+    int tls_active = 0;
+    if (is_https) {
+        nexos_tls_io_t io;
+        nexos_tls_tcp_io(&io, &http_conn);
+        size_t ca_len = (size_t)(nexos_tls_ca_end - nexos_tls_ca_start);
+        int tls_rc = nexos_tls_init(&tls, &io, host, nexos_tls_ca_start, ca_len);
+        if (!tls_rc) tls_rc = nexos_tls_handshake(&tls);
+        if (tls_rc) {
+            klog(LOG_WARN, "HTTPS: TLS failed for %s rc=%d verify=0x%x",
+                 host, tls_rc, nexos_tls_verify_result(&tls));
+            nexos_tls_free(&tls);
+            tcp_close(&http_conn);
+            return 0;
+        }
+        tls_active = 1;
+        klog(LOG_INFO, "HTTPS: TLS=%s verify=0x%x hostname=%s",
+             nexos_tls_version(&tls), nexos_tls_verify_result(&tls), host);
+    }
+
     /* Build and send GET request */
     uint8_t req[512];
     int req_len = build_request(req, (int)sizeof(req), host, path);
-    if (tcp_send(&http_conn, req, (uint16_t)req_len) < 0) {
+    int send_rc = tls_active
+        ? nexos_tls_write(&tls, req, (size_t)req_len)
+        : tcp_send(&http_conn, req, (uint16_t)req_len);
+    if (send_rc < 0) {
+        if (tls_active) nexos_tls_free(&tls);
         tcp_close(&http_conn);
         return 0;
     }
 
     /* Receive full response */
     uint8_t *resp_buf = (uint8_t *)kmalloc(HTTP_BUF_SIZE);
-    if (!resp_buf) { tcp_close(&http_conn); return 0; }
+    if (!resp_buf) {
+        if (tls_active) nexos_tls_free(&tls);
+        tcp_close(&http_conn);
+        return 0;
+    }
 
     uint32_t total = 0;
     uint64_t deadline = timer_get_ticks() + HTTP_RECV_MS;
     while (timer_get_ticks() < deadline && total < HTTP_BUF_SIZE - 1) {
-        int n = tcp_recv(&http_conn, resp_buf + total,
-                         (uint16_t)(HTTP_BUF_SIZE - 1 - total), 500);
+        int n = tls_active
+            ? nexos_tls_read(&tls, resp_buf + total,
+                             HTTP_BUF_SIZE - 1 - total, 500)
+            : tcp_recv(&http_conn, resp_buf + total,
+                       (uint16_t)(HTTP_BUF_SIZE - 1 - total), 500);
         if (n > 0) {
             total += (uint32_t)n;
             deadline = timer_get_ticks() + HTTP_RECV_MS; /* reset on data */
         }
-        if (http_conn.state == TCP_STATE_CLOSE_WAIT
-            || http_conn.state == TCP_STATE_CLOSED) break;
+        if (!tls_active && (http_conn.state == TCP_STATE_CLOSE_WAIT
+            || http_conn.state == TCP_STATE_CLOSED)) break;
     }
+    if (tls_active) nexos_tls_free(&tls);
     tcp_close(&http_conn);
 
     if (total == 0) {

@@ -33,7 +33,9 @@ int nexos_tls_init(nexos_tls_t *tls, const nexos_tls_io_t *io,
                    size_t ca_len) {
     int rc;
     if (!tls || !io || !io->send || !io->recv || !io->entropy ||
-        !hostname || !ca_pem || !ca_len) return -1;
+        !hostname || !ca_pem || !ca_len) {
+        return -1;
+    }
     memset(tls, 0, sizeof(*tls));
     tls->io = *io;
     mbedtls_ssl_init(&tls->ssl); mbedtls_ssl_config_init(&tls->config);
@@ -72,7 +74,9 @@ int nexos_tls_handshake(nexos_tls_t *tls) {
     if (!tls || !tls->initialized) return -1;
     do { rc = mbedtls_ssl_handshake(&tls->ssl); }
     while (rc == MBEDTLS_ERR_SSL_WANT_READ || rc == MBEDTLS_ERR_SSL_WANT_WRITE);
-    if (rc != 0 || mbedtls_ssl_get_verify_result(&tls->ssl) != 0) return rc ? rc : -2;
+    if (rc != 0 || mbedtls_ssl_get_verify_result(&tls->ssl) != 0) {
+        return rc ? rc : -2;
+    }
     tls->handshaken = 1; return 0;
 }
 int nexos_tls_write(nexos_tls_t *tls, const unsigned char *buf, size_t len) {

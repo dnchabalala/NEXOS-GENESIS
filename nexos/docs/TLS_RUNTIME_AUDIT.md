@@ -47,9 +47,9 @@ present.
 | entropy | ADAPT | `nexos_tls_entropy_rdrand()` uses CPU entropy and fails closed when unavailable |
 | TCP send/receive | ADAPT | `nexos_tls_tcp.c` calls existing `tcp_send`/`tcp_recv`; partial writes and timeout/EOF are represented |
 | monotonic time | EXISTS | PIT `timer_get_ticks()` and `timer_get_uptime_seconds()` |
-| wall-clock time | ADAPT | RTC-backed `gettimeofday` exists; Mbed TLS platform time/gmtime hooks still need final linkage |
+| wall-clock time | ADAPT | freestanding Mbed TLS uses the existing RTC-backed platform time/gmtime hooks |
 | trust store | EXISTS/ADAPT | pinned Mozilla bundle at `ports/tls/trust/cacert.pem` |
-| filesystem | ADAPT | final loader must read the bundle through the resource/VFS layer |
+| filesystem | DISABLE/ADAPT | freestanding TLS uses an embedded NUL-terminated trust bundle and performs no file I/O |
 | threads/locks | OPTIONAL | first milestone is single-threaded; Mbed TLS threading is disabled |
 | sockets | ADAPT | TLS callbacks receive an existing `tcp_conn_t`; no POSIX socket stack is added |
 
@@ -58,6 +58,7 @@ present.
 ```sh
 make -C nexos tls-source
 make -C nexos tls-host-test
+make -C nexos tls-freestanding
 ```
 
 `tls-host-test` builds the locked Mbed TLS source, uses the pinned CA bundle,
@@ -65,13 +66,28 @@ resolves `example.com`, opens TCP/443, performs a real handshake, validates
 the chain and hostname, sends an HTTP/1.1 request, and checks the decrypted
 HTTP response body. This is a pre-NetSurf adapter test; it is not QEMU proof.
 
+When the locked source tree is already present, the fetch target reuses it;
+removing that tree forces a fresh archive download and SHA-256 verification.
+
 The pinned bundle was downloaded from curl.se and has SHA-256
 `a41b5d356aea97a529fe27e0f7316d2f9d946d75927476cf9cf1b90637d00505`.
 
-## Remaining boundary
+## Freestanding NexOS proof
 
-The real mbed TLS API adapter and host HTTPS proof are implemented. The
-remaining work before `HTTPS WORKING` is the freestanding Mbed TLS library
-build and its NexOS allocator/time/VFS linkage, followed by connecting this
-adapter to the actual upstream NetSurf curl/fetcher path and exercising it in
-QEMU. Compilation of the host library alone is not counted as that milestone.
+`make -C nexos native-tls` boots the freestanding kernel image in QEMU and
+exercises `https://example.com/` through NexOS DHCP/DNS, the existing TCP
+stack, Mbed TLS, and the embedded CA bundle. The verified result is TLS 1.3,
+certificate verification `0x0`, HTTP 200, and the expected decrypted
+`Example Domain` body. QEMU user-mode networking must be allowed for the
+external DNS/HTTPS exchange.
+
+## NetSurf boundary
+
+The fetched upstream source confirms that `content/fetch.c` registers
+`content/fetchers/curl.c`, whose implementation uses libcurl's multi
+interface for HTTP and HTTPS. `NETSURF_USE_OPENSSL` only controls NetSurf's
+optional OpenSSL certificate-cache hooks; it does not make libcurl use the
+NexOS Mbed TLS adapter. The native HTTPS result therefore does not constitute
+NetSurf HTTPS or rendering proof. The next adapter must replace that libcurl
+transport boundary with the already-proven NexOS `http_get`/Mbed TLS path
+while preserving NetSurf's fetch callbacks.

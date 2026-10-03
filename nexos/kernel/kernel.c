@@ -27,8 +27,10 @@
 #include "installer/installer.h"
 #include "proc/scheduler.h"
 #include "proc/syscall.h"
+#include "net/http.h"
 #include <stdarg.h>
 #include <stdint.h>
+#include <string.h>
 
 /* ── Linker symbols — used by PMM to precisely reserve the kernel image ──── */
 extern uint8_t kernel_start[];
@@ -412,6 +414,22 @@ void kernel_main(uint32_t mb2_magic, mb2_info_t *mb2_info) {
     rtl8139_init();
     net_init();
     wifi_init();
+
+#ifdef NEXOS_NATIVE_TLS_TEST
+    /* Native proof: DNS/TCP/TLS all run inside this kernel. */
+    http_response_t *tls_probe = http_get("https://example.com/");
+    if (tls_probe) {
+        int body_ok = tls_probe->body &&
+            strstr((const char *)tls_probe->body, "Example Domain") != 0;
+        klog(body_ok ? LOG_INFO : LOG_ERROR,
+             "NATIVE TLS %s hostname=example.com HTTP=%d body=%u expected=%s",
+             body_ok ? "PASS" : "FAIL", tls_probe->status_code,
+             tls_probe->body_len, body_ok ? "OK" : "MISSING");
+        http_free(tls_probe);
+    } else {
+        klog(LOG_ERROR, "NATIVE TLS FAIL hostname=example.com");
+    }
+#endif
 
     /* ── 14. VFS + ramfs ──────────────────────────────────────────────────── */
     vfs_init();

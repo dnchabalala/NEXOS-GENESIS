@@ -9,6 +9,13 @@ mkdir -p "$SOURCE_DIR" "$TMP_DIR"
 while IFS='|' read -r name url sha version; do
     case "$name" in ''|'#'*) continue ;; esac
     archive="$TMP_DIR/$name-$version.tar.bz2"
+    # The locked source tree may already be present in a checkout.  Reuse it
+    # so validation targets remain usable offline; an explicit removal of the
+    # tree still forces a fresh download and checksum verification.
+    if [ -f "$SOURCE_DIR/$name-$version/include/mbedtls/ssl.h" ]; then
+        echo "using existing $name $version source tree"
+        continue
+    fi
     curl -fL --retry 3 -o "$archive" "$url"
     printf '%s  %s\n' "$sha" "$archive" | sha256sum -c -
     rm -rf "$SOURCE_DIR/$name-$version"

@@ -19,7 +19,14 @@ BOOT   = boot
 USER   = userspace
 TOOLS  = tools
 NETSURF_SOURCE_DIR ?= ports/netsurf/src
+NETSURF_HOST_PREFIX ?= ports/netsurf/host-prefix
+NETSURF_BUILD_SYSTEM := $(abspath $(NETSURF_SOURCE_DIR)/buildsystem)
+NETSURF_HOST_PREFIX_ABS := $(abspath $(NETSURF_HOST_PREFIX))
 TLS_SOURCE_DIR ?= ports/tls/src/mbedtls-3.6.7
+TLS_CONFIG_FILE := $(abspath ports/tls/mbedtls_nexos_config.h)
+TLS_LIB_DIR := $(TLS_SOURCE_DIR)/library
+TLS_LIBS := $(TLS_LIB_DIR)/libmbedtls.a $(TLS_LIB_DIR)/libmbedx509.a $(TLS_LIB_DIR)/libmbedcrypto.a
+LIBGCC := $(shell $(CC) -print-libgcc-file-name)
 
 KERNEL_ELF = $(BUILD)/nexos.kernel
 ISO_FILE   = $(BUILD)/nexos.iso
@@ -31,7 +38,13 @@ CFLAGS = -std=c11 -ffreestanding -fno-stack-protector -fno-pic \
         -ffunction-sections -fdata-sections -fno-common \
         -I$(ROOT) -I$(KERNEL) -I$(KERNEL)/include \
         -I$(KERNEL)/gui -I$(KERNEL)/drivers \
+        -Iports/tls -Iports/tls/include -I$(TLS_SOURCE_DIR)/include \
+        -DMBEDTLS_CONFIG_FILE=\"$(TLS_CONFIG_FILE)\" \
         -Wno-unused-parameter -Wno-unused-variable
+
+ifneq ($(NATIVE_TLS_TEST),)
+CFLAGS += -DNEXOS_NATIVE_TLS_TEST
+endif
 
 ASFLAGS = -f elf64
 
@@ -78,6 +91,10 @@ KERNEL_C_SOURCES = \
         $(KERNEL)/net/http.c \
         $(USER)/init/init.c \
         $(USER)/shell/nsh.c \
+        $(USER)/libc/string.c \
+        ports/tls/nexos_tls.c \
+        ports/tls/nexos_tls_tcp.c \
+        ports/tls/nexos_tls_platform.c \
         $(KERNEL)/drivers/fb.c \
         $(KERNEL)/drivers/font.c \
         $(KERNEL)/drivers/console.c \
@@ -109,7 +126,8 @@ KERNEL_ASM_SOURCES = \
         $(KERNEL)/arch/x86_64/boot.asm \
         $(KERNEL)/arch/x86_64/gdt_flush.asm \
         $(KERNEL)/arch/x86_64/isr.asm \
-        $(KERNEL)/arch/x86_64/enter_ring3.asm
+        $(KERNEL)/arch/x86_64/enter_ring3.asm \
+        ports/tls/trust_bundle.asm
 
 KERNEL_C_OBJS   = $(patsubst %.c,   $(BUILD)/%.o,     $(KERNEL_C_SOURCES))
 KERNEL_ASM_OBJS = $(patsubst %.asm, $(BUILD)/%.asm.o, $(KERNEL_ASM_SOURCES))
@@ -121,17 +139,47 @@ DISK_IMG = $(BUILD)/nexos_disk.img
 .PHONY: all kernel iso clean run run-debug run-with-disk disk \
         install install-usb run-vbox run-vmware run-installer check
 
-.PHONY: netsurf-sources netsurf-config tls-source tls-check tls-host-test test-tcp
+.PHONY: netsurf-sources netsurf-config netsurf-deps netsurf-adapter-check tls-source tls-check tls-host-test \
+        tls-freestanding native-tls test-tcp
 
 netsurf-sources:
 	@chmod +x $(TOOLS)/netsurf_fetch_sources.sh
 	@$(TOOLS)/netsurf_fetch_sources.sh
 
 netsurf-config: netsurf-sources
+	@cp ports/netsurf/Makefile.config $(NETSURF_SOURCE_DIR)/netsurf/Makefile.config
+	@chmod +x tools/netsurf_apply_nexos_fetcher.sh
+	@NETSURF_SOURCE_DIR=$(NETSURF_SOURCE_DIR) tools/netsurf_apply_nexos_fetcher.sh
 	@command -v gperf >/dev/null 2>&1 || \
 		{ echo "Missing host tool: gperf (required to generate libhubbub parser tables)." >&2; exit 127; }
-	@cp ports/netsurf/Makefile.config $(NETSURF_SOURCE_DIR)/netsurf/Makefile.config
 	@echo "NetSurf first-milestone configuration installed"
+
+netsurf-deps: netsurf-config
+	@$(MAKE) -C $(NETSURF_SOURCE_DIR)/libwapcaplet \
+		PREFIX=$(NETSURF_HOST_PREFIX_ABS) NSSHARED=$(NETSURF_BUILD_SYSTEM) install
+	@$(MAKE) -C $(NETSURF_SOURCE_DIR)/libparserutils \
+		PREFIX=$(NETSURF_HOST_PREFIX_ABS) NSSHARED=$(NETSURF_BUILD_SYSTEM) \
+		PKG_CONFIG_PATH=$(NETSURF_HOST_PREFIX_ABS)/lib/pkgconfig install
+	@$(MAKE) -C $(NETSURF_SOURCE_DIR)/libhubbub \
+		PREFIX=$(NETSURF_HOST_PREFIX_ABS) NSSHARED=$(NETSURF_BUILD_SYSTEM) \
+		PKG_CONFIG_PATH=$(NETSURF_HOST_PREFIX_ABS)/lib/pkgconfig install
+	@$(MAKE) -C $(NETSURF_SOURCE_DIR)/libnsutils \
+		PREFIX=$(NETSURF_HOST_PREFIX_ABS) NSSHARED=$(NETSURF_BUILD_SYSTEM) \
+		PKG_CONFIG_PATH=$(NETSURF_HOST_PREFIX_ABS)/lib/pkgconfig install
+	@$(MAKE) -C $(NETSURF_SOURCE_DIR)/libcss \
+		PREFIX=$(NETSURF_HOST_PREFIX_ABS) NSSHARED=$(NETSURF_BUILD_SYSTEM) \
+		PKG_CONFIG_PATH=$(NETSURF_HOST_PREFIX_ABS)/lib/pkgconfig install
+	@$(MAKE) -C $(NETSURF_SOURCE_DIR)/libdom \
+		PREFIX=$(NETSURF_HOST_PREFIX_ABS) NSSHARED=$(NETSURF_BUILD_SYSTEM) \
+		PKG_CONFIG_PATH=$(NETSURF_HOST_PREFIX_ABS)/lib/pkgconfig install
+	@$(MAKE) -C $(NETSURF_SOURCE_DIR)/libnsfb \
+		PREFIX=$(NETSURF_HOST_PREFIX_ABS) NSSHARED=$(NETSURF_BUILD_SYSTEM) \
+		PKG_CONFIG_PATH=$(NETSURF_HOST_PREFIX_ABS)/lib/pkgconfig install
+	@echo "NetSurf locked host dependencies built and installed"
+
+netsurf-adapter-check: netsurf-sources
+	@chmod +x tools/check_netsurf_adapter.sh
+	@NETSURF_SOURCE_DIR=$(NETSURF_SOURCE_DIR) tools/check_netsurf_adapter.sh
 
 tls-source:
 	@chmod +x tools/tls_fetch_source.sh
@@ -146,7 +194,13 @@ tls-check: tls-source
 		-Wno-unused-variable -fsyntax-only ports/tls/nexos_tls.c \
 		ports/tls/nexos_tls_tcp.c
 
+tls-freestanding: tls-source
+	@chmod +x tools/build_mbedtls_nexos.sh
+	@TLS_SOURCE_DIR=$(TLS_SOURCE_DIR) TLS_CONFIG_FILE=$(TLS_CONFIG_FILE) \
+		 tools/build_mbedtls_nexos.sh
+
 tls-host-test: tls-source
+	@$(MAKE) -C $(TLS_SOURCE_DIR) clean >/dev/null
 	@$(MAKE) -C $(TLS_SOURCE_DIR) -j2 lib
 	@gcc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror \
 		-I$(TLS_SOURCE_DIR)/include -Iports/tls \
@@ -155,6 +209,10 @@ tls-host-test: tls-source
 		$(TLS_SOURCE_DIR)/library/libmbedx509.a \
 		$(TLS_SOURCE_DIR)/library/libmbedcrypto.a -o /tmp/nexos-https-test
 	@/tmp/nexos-https-test example.com ports/tls/trust/cacert.pem
+
+native-tls: clean
+	@$(MAKE) NATIVE_TLS_TEST=1 iso
+	@DISPLAY_MODE=none tools/run_qemu.sh
 
 all: kernel iso
 
@@ -227,10 +285,12 @@ clean:
 	rm -rf $(BUILD)
 
 # ---- Link ----
-$(KERNEL_ELF): $(ALL_OBJS) $(BOOT)/linker.ld
+$(KERNEL_ELF): $(ALL_OBJS) $(BOOT)/linker.ld $(TLS_LIBS)
 	@mkdir -p $(dir $@)
 	@echo "[LD] $@"
-	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS)
+	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS) $(TLS_LIBS) $(LIBGCC)
+
+$(TLS_LIBS): tls-freestanding
 
 # ---- Compile C ----
 $(BUILD)/%.o: %.c

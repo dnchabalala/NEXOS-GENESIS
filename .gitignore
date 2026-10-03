@@ -11,6 +11,8 @@
 __pycache__/
 
 # Dependencies
+nexos/ports/netsurf/src/
+nexos/ports/netsurf/host-prefix/
 node_modules/
 venv/
 .venv/

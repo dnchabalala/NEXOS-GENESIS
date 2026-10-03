@@ -27,10 +27,23 @@ int nexos_tls_entropy_rdrand(void *opaque, unsigned char *buf, size_t len) {
                      : "a"(1), "c"(0));
     if (!(ecx & (1u << 30))) return -1;
     for (size_t i = 0; i < len; i++) {
-        uint32_t v; uint8_t ok;
-        __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
+        uint32_t v = 0; uint8_t ok = 0;
+        for (int retry = 0; retry < 10 && !ok; retry++) {
+            __asm__ volatile("rdrand %0; setc %1" : "=r"(v), "=qm"(ok));
+        }
         if (!ok) return -1;
-        buf[i] = (unsigned char)v;
+        buf[i] = (unsigned char)(v >> ((i & 3) * 8));
     }
     return 0;
+}
+
+/* Mbed TLS PSA's internal RNG uses the platform hardware-poll hook.  Reuse
+ * the same RDRAND source exposed to the TLS adapter above. */
+int mbedtls_hardware_poll(void *data, unsigned char *output, size_t len,
+                          size_t *olen) {
+    int rc;
+    (void)data;
+    rc = nexos_tls_entropy_rdrand(0, output, len);
+    if (rc == 0 && olen) *olen = len;
+    return rc;
 }

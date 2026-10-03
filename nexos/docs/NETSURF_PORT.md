@@ -22,9 +22,9 @@ netsurf TARGET=framebuffer
 ├── libnsutils                      NetSurf utility support
 ├── libnsgif / libnsbmp             disabled initially; enable after base path
 ├── libpng                          first remote image format
-├── libcurl                         HTTP and HTTPS transfer state machine
-├── TLS backend                     certificate-validating backend, TBD by port test
-├── zlib                            compression support
+├── NexOS fetcher boundary          NetSurf fetch callbacks over existing http_get()
+├── TLS backend                     existing freestanding Mbed TLS adapter
+├── zlib                            compression support (future response decoding)
 └── internal framebuffer font       avoids a freetype dependency initially
 ```
 
@@ -54,8 +54,8 @@ The fetch script verifies the commit after cloning.
 | libnsutils | `0bd39060740b6163bd50875326654a722df97eb2` |
 | libnsfb | `b701cdce7241c3747ccd78658a365db0983ebe24` |
 | libpng | host/system dependency; NexOS port pending |
-| libcurl | host/system dependency; NexOS port pending |
-| TLS | selection pending portability/build probe |
+| libcurl | intentionally disabled for NexOS first milestone; its multi/socket ABI is host-oriented |
+| TLS | freestanding Mbed TLS is verified independently in native NexOS |
 | netsurf | `39da3c3a40af4566d86500ff3052dfdc7f9a0378` |
 
 The commits above are the shallow-clone heads obtained during this port. The
@@ -67,12 +67,12 @@ commit requires updating this document and rerunning the dependency audit.
 | Adapter | Upstream call surface | NexOS target | Status |
 |---|---|---|---|
 | memory | `malloc`, `calloc`, `realloc`, `free` | `kmalloc`/`kfree` or hosted runtime wrapper | pending |
-| framebuffer | `nsfb_new`, geometry, buffer, claim/update, plotters | `fb.addr`, `fb.pitch`, `fb.width`, `fb.height` | pending |
-| input | `nsfb_event`, keyboard/mouse event codes | `keyboard_*`, `mouse_*` | pending |
+| framebuffer | `nsfb_new`, geometry, buffer, claim/update, plotters | `fb.addr`, `fb.pitch`, `fb.width`, `fb.height` | adapter present; linked NetSurf use pending |
+| input | `nsfb_event`, keyboard/mouse event codes | `keyboard_*`, `mouse_*` | adapter present; linked NetSurf use pending |
 | timer | `gettimeofday`, monotonic scheduling | NexOS timer/PIT facilities | pending |
 | filesystem | resource/config/certificate reads | VFS/RAMFS/FAT32 bridge | pending |
-| transport | curl socket callbacks | `dns_resolve`, `tcp_*` through a socket shim | partial |
-| TLS | curl SSL backend and certificate verification | selected portable TLS backend | pending |
+| transport | NetSurf `fetcher_operation_table` | existing `http_get()` → DNS/TCP/Mbed TLS | adapter ABI compiled; runtime browser path pending |
+| TLS | NexOS HTTP boundary | existing freestanding Mbed TLS and embedded trust store | native HTTPS verified |
 
 No adapter is marked complete until it is compiled against the actual selected
 upstream headers and exercised by a test.
@@ -84,24 +84,21 @@ upstream surface name `nexos`. It is intentionally not included in the normal
 NexOS kernel build yet: its correct compile target is the NetSurf/libnsfb
 port, where libnsfb's internal surface ABI is available.
 
-The first narrow socket ABI is also present in
-`kernel/net/socket_compat.{h,c}` and the syscall dispatcher now implements
-only AF_INET/SOCK_STREAM `socket`, `connect`, `sendto`, `recvfrom`, and
-`close` over the existing `tcp_*` API. It deliberately leaves server sockets,
-`sendmsg`, and `recvmsg` unsupported.
+The existing narrow socket ABI remains in
+`kernel/net/socket_compat.{h,c}` and implements the supported
+AF_INET/SOCK_STREAM operations over the current TCP stack. Native HTTPS
+does not use host sockets: `kernel/net/http.c` drives NexOS DNS/TCP and the
+freestanding Mbed TLS adapter directly, with certificate validation against
+the embedded trust bundle.
 
-This adapter is not yet TLS-capable. The underlying TCP evidence is concrete:
-`kernel/net/tcp.c::tcp_send()` emits a single segment per call,
-`tcp_receive()` drops out-of-order data, and the connection has one global
-`active_conn`. The socket layer chunks writes to 1400 bytes, but reliable
-segmentation/retransmission and multiple connections are still required
-before curl/OpenSSL can be considered usable for arbitrary HTTPS traffic.
-
-The upstream fetcher also confirms that NetSurf's OpenSSL-enabled path uses
-OpenSSL X509 types directly in `content/fetchers/curl.c` for certificate
-information. A portable curl TLS backend such as mbedTLS may be possible with
-`NETSURF_USE_OPENSSL=NO`, but that must be proven by a real curl/NetSurf build;
-certificate validation must not be disabled as a shortcut.
+The upstream fetcher audit confirms that `content/fetchers/curl.c` uses
+libcurl's multi interface, fd-set polling, socket callbacks, and host libcurl
+TLS configuration. Porting that whole ABI would duplicate the already-proven
+NexOS HTTP/TLS boundary. The first NexOS configuration therefore disables
+libcurl and registers `content/fetchers/nexos.c` through NetSurf's existing
+`fetcher_operation_table`. The adapter emits normal NetSurf header/data/
+finished messages and calls the existing `http_get()` implementation; it does
+not implement a second browser transport.
 
 ## Implementation order
 
@@ -113,14 +110,21 @@ certificate validation must not be disabled as a shortcut.
 4. Port `libnsfb`'s RAM/plot surface to the existing NexOS framebuffer and
    translate existing keyboard/mouse events.
 5. Adapt the event scheduler and resource filesystem calls.
-6. Select and port a TLS backend with hostname and certificate validation.
-7. Adapt curl's required socket operations to existing DNS/TCP primitives.
-8. Cross-build the selected NetSurf libraries and link a NexOS application.
-9. Validate DNS → TCP → TLS → certificate → HTTP → HTML/CSS/layout → text /
+6. Build the selected host dependency libraries with
+   `make -C nexos netsurf-deps` and cross-build the selected NetSurf sources.
+7. Exercise a real NetSurf HTTPS fetch in QEMU.
+8. Validate DNS → TCP → TLS → certificate → HTTP → HTML/CSS/layout → text /
    PNG rendering in QEMU.
 
-The current repository does not yet satisfy steps 3–9. This is an
-implementation status document, not a success claim.
+The repository now satisfies the locked dependency and fetcher ABI steps
+through `make -C nexos netsurf-deps` and
+`make -C nexos netsurf-adapter-check`. The upstream framebuffer sources also
+compile, including `content/fetchers/nexos.c`, but the hosted `nsfb`
+executable cannot be the NexOS runtime artifact: its link fails because the
+NexOS fetcher intentionally references kernel-only `http_get()` and
+`http_free()` symbols. The remaining work is to embed the selected NetSurf
+core/frontend objects into the freestanding NexOS image and provide the
+existing NexOS window/framebuffer/runtime entry points at that boundary.
 
 The first NexOS runtime change is now present: `kernel/arch/x86_64/fpu.c`
 enables the architectural FPU/SSE state before interrupts. This is required
@@ -144,8 +148,20 @@ make: gperf: No such file or directory
 make: *** ... autogenerated-element-type.c ... Error 127
 ```
 
-`libdom` then failed only because `libhubbub.pc` and its headers had not been
-installed. This is a reproducible build-tool prerequisite, not evidence that
-NexOS needs a `gperf` runtime interface. The host has no package manager in
-the current environment, so the NexOS port does not vendor or replace this
-build generator.
+The generator is a host build prerequisite, not evidence that NexOS needs a
+`gperf` runtime interface. With `gperf` installed, libhubbub now generates
+`autogenerated-element-type.c` normally and the locked dependency graph
+builds successfully.
+
+The next concrete link failure is from the standard hosted framebuffer
+target:
+
+```text
+/usr/bin/ld: content_fetchers_nexos.o: undefined reference to `http_get'
+/usr/bin/ld: content_fetchers_nexos.o: undefined reference to `http_free'
+```
+
+This occurs because `TARGET=framebuffer` produces a Linux host executable,
+while those symbols intentionally belong to the freestanding NexOS kernel.
+Adding host shims would conceal the real runtime boundary and duplicate the
+transport, so the port must link NetSurf as part of the NexOS image instead.
