@@ -316,12 +316,24 @@ http_response_t *http_get(const char *url) {
     int body_off   = find_body(resp_buf, total);
 
     r->location[0] = 0;
+    r->content_type[0] = 0;
     const uint8_t *location = find_header(resp_buf, total, "Location", 8);
     if (location) {
         int n = header_value_len(location, resp_buf + total);
         if (n > (int)sizeof(r->location) - 1) n = (int)sizeof(r->location) - 1;
         for (int i = 0; i < n; i++) r->location[i] = (char)location[i];
         r->location[n] = 0;
+    }
+
+    const uint8_t *content_type = find_header(resp_buf, total,
+                                               "Content-Type", 12);
+    if (content_type) {
+        int n = header_value_len(content_type, resp_buf + total);
+        if (n > (int)sizeof(r->content_type) - 1)
+            n = (int)sizeof(r->content_type) - 1;
+        for (int i = 0; i < n; i++)
+            r->content_type[i] = (char)content_type[i];
+        r->content_type[n] = 0;
     }
 
     if (body_off < 0 || (uint32_t)body_off >= total) {

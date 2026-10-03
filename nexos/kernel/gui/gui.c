@@ -25,6 +25,17 @@
 #include "../drivers/timer.h"
 #include "../kernel.h"
 
+#ifdef NEXOS_NATIVE_NETSURF_TEST
+#include "../../ports/netsurf/src/netsurf/utils/errors.h"
+#include "../../ports/netsurf/src/netsurf/include/netsurf/browser_window.h"
+extern nserror nexos_netsurf_init(void);
+extern nserror nexos_netsurf_open_url(const char *address,
+                                      struct browser_window **out);
+extern nserror nexos_netsurf_open_blank(struct browser_window **out);
+extern void nexos_netsurf_pump(void);
+extern void nexos_netsurf_schedule_url(const char *address, int delay_ms);
+#endif
+
 /* ── Launch helpers (called from launcher.c) ─────────────────────────────── */
 static int term_count  = 0;
 static int files_count = 0;
@@ -135,6 +146,26 @@ void gui_main(void) {
     taskbar_init();
     notif_init();
 
+#ifdef NEXOS_NATIVE_NETSURF_TEST
+    {
+        struct browser_window *netsurf_window = NULL;
+        nserror error = nexos_netsurf_init();
+        klog(error == NSERROR_OK ? LOG_INFO : LOG_ERROR,
+             "NETSURF INIT %s error=%d",
+             error == NSERROR_OK ? "PASS" : "FAIL", (int)error);
+        if (error == NSERROR_OK) {
+            error = nexos_netsurf_open_blank(&netsurf_window);
+            klog(error == NSERROR_OK ? LOG_INFO : LOG_ERROR,
+                 "NETSURF CONTEXT %s error=%d",
+                 error == NSERROR_OK ? "PASS" : "FAIL", (int)error);
+            klog(netsurf_window != NULL ? LOG_INFO : LOG_ERROR,
+                 "NETSURF SURFACE %s",
+                 netsurf_window != NULL ? "PASS" : "FAIL");
+            nexos_netsurf_schedule_url("https://nexos.dnchabalala.site/", 3000);
+        }
+    }
+#endif
+
     /* 2. Draw initial desktop */
     fb_clear(COL_BASE);
     desktop_draw();
@@ -165,6 +196,9 @@ void gui_main(void) {
         /* Process NIC packets outside interrupt context.  The RTL8139 IRQ
          * only marks RX work pending because the network stack allocates. */
         rtl8139_service();
+#ifdef NEXOS_NATIVE_NETSURF_TEST
+        nexos_netsurf_pump();
+#endif
 
         /* ── Keyboard events ────────────────────────────────────────────── */
         while (keyboard_available()) {

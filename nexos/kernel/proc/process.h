@@ -7,7 +7,7 @@
 
 #define MAX_PROCESSES   64
 #define MAX_FDS         16
-#define PROC_STACK_SIZE (4096)       /* 1 page (4 KB) kernel stack per process */
+#define PROC_STACK_SIZE (64 * 1024)  /* NetSurf/freestanding kernel stack */
 #define MAX_ENV_VARS    64
 #define MAX_ENV_LEN     256
 

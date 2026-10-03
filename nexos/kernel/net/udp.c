@@ -67,6 +67,11 @@ void udp_receive(const uint8_t *data, uint16_t len, uint32_t src_ip) {
     const uint8_t *payload = data + UDP_HDR_LEN;
     uint16_t       plen    = (uint16_t)(udp_len - UDP_HDR_LEN);
 
+    if (dst_port == 1053) {
+        klog(LOG_INFO, "UDP: DNS candidate src=%u dst=%u len=%u",
+             src_port, dst_port, plen);
+    }
+
     for (int i = 0; i < UDP_MAX_HANDLERS; i++) {
         if (udp_handlers[i].fn && udp_handlers[i].port == dst_port) {
             udp_handlers[i].fn(src_ip, src_port, payload, plen);

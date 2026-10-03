@@ -111,7 +111,8 @@ not implement a second browser transport.
    translate existing keyboard/mouse events.
 5. Adapt the event scheduler and resource filesystem calls.
 6. Build the selected host dependency libraries with
-   `make -C nexos netsurf-deps` and cross-build the selected NetSurf sources.
+   `make -C nexos netsurf-deps` and cross-build the selected NetSurf sources
+   with `make -C nexos netsurf-native-objects`.
 7. Exercise a real NetSurf HTTPS fetch in QEMU.
 8. Validate DNS → TCP → TLS → certificate → HTTP → HTML/CSS/layout → text /
    PNG rendering in QEMU.
@@ -125,6 +126,16 @@ NexOS fetcher intentionally references kernel-only `http_get()` and
 `http_free()` symbols. The remaining work is to embed the selected NetSurf
 core/frontend objects into the freestanding NexOS image and provide the
 existing NexOS window/framebuffer/runtime entry points at that boundary.
+
+`netsurf-native-objects` is the first freestanding embedding increment. It
+compiles the selected upstream core, content, HTML/CSS/layout, URL/HTTP
+utility, and NexOS fetcher objects with the NexOS headers and SSE enabled for
+NetSurf layout ABI requirements, producing
+`build/netsurf-native/libnetsurf-native.a`. Hosted persistence/file-fetcher,
+about-page, JavaScript, and image frontend sources are excluded from this
+first HTML/CSS milestone. The archive is not yet linked into the kernel:
+the remaining boundary is a native NetSurf startup/frontend entry point and
+freestanding builds of the portable dependency archives.
 
 The first NexOS runtime change is now present: `kernel/arch/x86_64/fpu.c`
 enables the architectural FPU/SSE state before interrupts. This is required
@@ -165,3 +176,38 @@ This occurs because `TARGET=framebuffer` produces a Linux host executable,
 while those symbols intentionally belong to the freestanding NexOS kernel.
 Adding host shims would conceal the real runtime boundary and duplicate the
 transport, so the port must link NetSurf as part of the NexOS image instead.
+
+## Current NexOS UI boundary
+
+The existing Apps -> Browser entry is not NetSurf. `kernel/gui/launcher.c`
+registers `launch_browser`, which is defined in `kernel/gui/gui.c` and calls
+`browser_create()` in `kernel/gui/browser_app.c`. That application has its own
+address bar, HTTP fetch call, bounded HTML tag stripper, and framebuffer
+renderer. Its `browser_fetch_depth()` scheme check rejects every URL that does
+not begin with `http://`, so `https://example.com` displays
+`Error: URL must start with http://` before calling `http_get()`.
+
+The kernel `http_get()` implementation itself already handles HTTPS through
+the native TLS path; the visible legacy application does not reach it for an
+HTTPS URL. Normal boot also does not initialize NetSurf. The native TLS probe
+is compiled and run only by `make native-tls`, while normal boot messages are
+network/GUI initialization. Apps -> Browser will remain on this existing shell
+until a real native NetSurf frontend and engine link are available.
+
+`netsurf-native-deps` now cross-builds the required locked portable archives
+with freestanding NexOS flags. `netsurf-native-link-probe` combines those
+archives with `libnetsurf-native.a` using `ld -r`, and
+`netsurf-native-kernel-link` produces the separate
+`build/nexos.kernel.netsurf` image with the engine and frontend linked into
+the real kernel. The native frontend currently registers the mandatory
+operation tables, creates a NexOS WM-backed browser surface, initializes the
+real NetSurf engine, and runs a NexOS timer pump. A controlled QEMU probe has
+confirmed `NETSURF INIT PASS`, `NETSURF CONTEXT PASS`, and
+`NETSURF SURFACE PASS` without changing Apps -> Browser.
+
+The remaining runtime boundary is navigation/fetch scheduling: the first
+deferred HTTPS request reaches the existing `http_get()` path but its DNS
+poll timed out from the browser-triggered call. Plotter/bitmap redraw and
+HTML/CSS/layout completion are not yet claimed. The ordinary Apps -> Browser
+entry therefore remains the legacy viewer until those native NetSurf stages
+are proven.

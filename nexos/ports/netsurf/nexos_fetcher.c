@@ -10,6 +10,7 @@
 #include "content/fetch.h"
 #include "content/fetchers.h"
 #include "kernel/net/http.h"
+#include "kernel/kernel.h"
 
 struct nexos_fetch_info {
 	struct fetch *fetch_handle;
@@ -65,8 +66,10 @@ static bool nexos_fetch_start(void *data)
 	 * the normal NetSurf fetch scheduler. */
 	if (active_fetch != NULL) return false;
 	active_fetch = fetch;
+	klog(LOG_INFO, "NETSURF FETCH START url=%s", nsurl_access(fetch->url));
 	response = http_get(nsurl_access(fetch->url));
 	if (response == NULL) {
+		klog(LOG_WARN, "NETSURF FETCH ERROR url=%s", nsurl_access(fetch->url));
 		msg.type = FETCH_ERROR;
 		msg.data.error = "NexOS HTTP request failed";
 		fetch_send_callback(&msg, fetch->fetch_handle);
@@ -75,28 +78,44 @@ static bool nexos_fetch_start(void *data)
 	}
 
 	fetch_set_http_code(fetch->fetch_handle, response->status_code);
+	klog(LOG_INFO, "NETSURF FETCH HTTP=%d body=%u url=%s",
+	     (int64_t)response->status_code, (uint64_t)response->body_len,
+	     nsurl_access(fetch->url));
 	if (fetch->only_2xx && (response->status_code < 200 ||
 				       response->status_code >= 300)) {
 		msg.type = FETCH_ERROR;
 		msg.data.error = "Not2xx";
 		fetch_send_callback(&msg, fetch->fetch_handle);
+		klog(LOG_INFO, "NETSURF FETCH HEADER");
 	} else {
-		int n = snprintf(header, sizeof(header),
-				 "HTTP/1.1 %d\r\nContent-Type: text/html\r\n\r\n",
+		int n = snprintf(header, sizeof(header), "HTTP/1.1 %d OK\r\n",
 				 response->status_code);
 		msg.type = FETCH_HEADER;
 		msg.data.header_or_data.buf = (const uint8_t *)header;
 		msg.data.header_or_data.len = (size_t)n;
 		fetch_send_callback(&msg, fetch->fetch_handle);
+		klog(LOG_INFO, "NETSURF FETCH HEADER");
+
+		if (response->content_type[0] != '\0') {
+			n = snprintf(header, sizeof(header), "Content-Type: %s\r\n",
+				     response->content_type);
+			msg.data.header_or_data.len = (size_t)n;
+			fetch_send_callback(&msg, fetch->fetch_handle);
+			klog(LOG_INFO, "NETSURF FETCH CONTENT-TYPE %s",
+			     response->content_type);
+		}
 
 		if (response->body_len != 0) {
 			msg.type = FETCH_DATA;
 			msg.data.header_or_data.buf = response->body;
 			msg.data.header_or_data.len = response->body_len;
 			fetch_send_callback(&msg, fetch->fetch_handle);
+			klog(LOG_INFO, "NETSURF FETCH DATA bytes=%u",
+			     (uint64_t)response->body_len);
 		}
 		msg.type = FETCH_FINISHED;
 		fetch_send_callback(&msg, fetch->fetch_handle);
+		klog(LOG_INFO, "NETSURF FETCH FINISHED");
 	}
 
 	http_free(response);
@@ -124,6 +143,7 @@ static void nexos_fetch_poll(lwc_string *scheme)
 	struct nexos_fetch_info *fetch = active_fetch;
 	(void)scheme;
 	if (fetch == NULL || !fetch->completed) return;
+	klog(LOG_INFO, "NETSURF FETCH POLL CLEANUP");
 	active_fetch = NULL;
 	fetch_remove_from_queues(fetch->fetch_handle);
 	fetch_free(fetch->fetch_handle);

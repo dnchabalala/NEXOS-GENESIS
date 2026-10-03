@@ -46,6 +46,15 @@ ifneq ($(NATIVE_TLS_TEST),)
 CFLAGS += -DNEXOS_NATIVE_TLS_TEST
 endif
 
+ifneq ($(NATIVE_NETSURF_TEST),)
+CFLAGS += -DNEXOS_NATIVE_NETSURF_TEST \
+	-Iports/netsurf/src -Iports/netsurf/src/netsurf \
+	-Iports/netsurf/src/netsurf/include -Iports/netsurf/src/libwapcaplet/include \
+	-Iports/netsurf/src/libparserutils/include -Iports/netsurf/src/libhubbub/include \
+	-Iports/netsurf/src/libnsutils/include -Iports/netsurf/src/libcss/include \
+	-Iports/netsurf/src/libdom/include -Iports/netsurf/src/libnsfb/include
+endif
+
 ASFLAGS = -f elf64
 
 LDFLAGS = -T $(BOOT)/linker.ld -nostdlib -z noexecstack --gc-sections
@@ -68,6 +77,7 @@ KERNEL_C_SOURCES = \
         $(KERNEL)/drivers/wifi.c \
         $(KERNEL)/mm/pmm.c \
         $(KERNEL)/mm/heap.c \
+        $(KERNEL)/errno.c \
         $(KERNEL)/mm/vmm.c \
         $(KERNEL)/fs/vfs.c \
         $(KERNEL)/fs/ramfs.c \
@@ -92,6 +102,8 @@ KERNEL_C_SOURCES = \
         $(USER)/init/init.c \
         $(USER)/shell/nsh.c \
         $(USER)/libc/string.c \
+        $(KERNEL)/libc.c \
+        $(KERNEL)/libc_float.c \
         ports/tls/nexos_tls.c \
         ports/tls/nexos_tls_tcp.c \
         ports/tls/nexos_tls_platform.c \
@@ -139,8 +151,8 @@ DISK_IMG = $(BUILD)/nexos_disk.img
 .PHONY: all kernel iso clean run run-debug run-with-disk disk \
         install install-usb run-vbox run-vmware run-installer check
 
-.PHONY: netsurf-sources netsurf-config netsurf-deps netsurf-adapter-check tls-source tls-check tls-host-test \
-        tls-freestanding native-tls test-tcp
+.PHONY: netsurf-sources netsurf-config netsurf-deps netsurf-adapter-check netsurf-native-objects netsurf-native-deps netsurf-native-frontend netsurf-native-link-probe netsurf-native-kernel-link tls-source tls-check tls-host-test \
+		tls-freestanding native-tls test-tcp netsurf-native-kernel-test netsurf-native-run netsurf-native-gui-object
 
 netsurf-sources:
 	@chmod +x $(TOOLS)/netsurf_fetch_sources.sh
@@ -180,6 +192,51 @@ netsurf-deps: netsurf-config
 netsurf-adapter-check: netsurf-sources
 	@chmod +x tools/check_netsurf_adapter.sh
 	@NETSURF_SOURCE_DIR=$(NETSURF_SOURCE_DIR) tools/check_netsurf_adapter.sh
+
+netsurf-native-objects: netsurf-deps netsurf-adapter-check
+	@chmod +x tools/build_netsurf_native_objects.sh
+	@NETSURF_SOURCE_DIR=$(NETSURF_SOURCE_DIR) NETSURF_HOST_PREFIX=$(NETSURF_HOST_PREFIX) \
+		 tools/build_netsurf_native_objects.sh
+
+netsurf-native-deps: netsurf-deps
+	@chmod +x tools/build_netsurf_native_deps.sh
+	@NETSURF_SOURCE_DIR=$(NETSURF_SOURCE_DIR) NETSURF_HOST_PREFIX=$(NETSURF_HOST_PREFIX) \
+		 tools/build_netsurf_native_deps.sh
+
+netsurf-native-frontend: netsurf-native-deps
+	@chmod +x tools/build_netsurf_native_frontend.sh
+	@NETSURF_SOURCE_DIR=$(NETSURF_SOURCE_DIR) NETSURF_HOST_PREFIX=$(NETSURF_HOST_PREFIX) \
+		 tools/build_netsurf_native_frontend.sh
+
+netsurf-native-link-probe: netsurf-native-objects netsurf-native-frontend
+	@chmod +x tools/link_netsurf_native_probe.sh
+	@tools/link_netsurf_native_probe.sh
+
+netsurf-native-kernel-link: netsurf-native-link-probe netsurf-native-gui-object $(ALL_OBJS) $(TLS_LIBS)
+	@echo "[LD] build/nexos.kernel.netsurf"
+	$(LD) $(LDFLAGS) -o build/nexos.kernel.netsurf $(ALL_OBJS) $(TLS_LIBS) \
+		--whole-archive build/netsurf-native/libnetsurf-native.a \
+		build/netsurf-native/libnetsurf-native-frontend.a \
+		build/netsurf-native/libwapcaplet-native.a \
+		build/netsurf-native/libparserutils-native.a \
+		build/netsurf-native/libhubbub-native.a \
+		build/netsurf-native/libnsutils-native.a \
+		build/netsurf-native/libcss-native.a \
+		build/netsurf-native/libdom-native.a \
+		build/netsurf-native/libnsfb-native.a \
+		--no-whole-archive $(LIBGCC)
+
+netsurf-native-gui-object:
+	@mkdir -p build/kernel/gui
+	@echo "[CC] kernel/gui/gui.c (native NetSurf target)"
+	$(CC) $(CFLAGS) -c kernel/gui/gui.c -o build/kernel/gui/gui.o
+
+netsurf-native-kernel-test:
+	@$(MAKE) NATIVE_NETSURF_TEST=1 netsurf-native-kernel-link
+
+netsurf-native-run: netsurf-native-kernel-link
+	@KERNEL=build/nexos.kernel.netsurf tools/build_iso.sh
+	@DISPLAY_MODE=none tools/run_qemu.sh
 
 tls-source:
 	@chmod +x tools/tls_fetch_source.sh
@@ -297,6 +354,8 @@ $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "[CC] $<"
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(BUILD)/kernel/libc_float.o: CFLAGS += -msse -msse2 -mfpmath=sse
 
 # ---- Assemble ----
 $(BUILD)/%.asm.o: %.asm

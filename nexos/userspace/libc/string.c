@@ -31,6 +31,29 @@ int strncmp(const char *a, const char *b, size_t n) {
     return (unsigned char)*a - (unsigned char)*b;
 }
 
+static unsigned char ascii_lower(unsigned char c) {
+    return (c >= 'A' && c <= 'Z') ? (unsigned char)(c + ('a' - 'A')) : c;
+}
+
+int strcasecmp(const char *a, const char *b) {
+    while (*a && ascii_lower((unsigned char)*a) ==
+           ascii_lower((unsigned char)*b)) {
+        a++; b++;
+    }
+    return (int)ascii_lower((unsigned char)*a) -
+           (int)ascii_lower((unsigned char)*b);
+}
+
+int strncasecmp(const char *a, const char *b, size_t n) {
+    while (n && *a && ascii_lower((unsigned char)*a) ==
+           ascii_lower((unsigned char)*b)) {
+        a++; b++; n--;
+    }
+    if (!n) return 0;
+    return (int)ascii_lower((unsigned char)*a) -
+           (int)ascii_lower((unsigned char)*b);
+}
+
 char *strcat(char *dst, const char *src) {
     char *d = dst;
     while (*d) d++;
@@ -107,6 +130,42 @@ int memcmp(const void *a, const void *b, size_t n) {
         aa++; bb++;
     }
     return 0;
+}
+
+size_t strspn(const char *s, const char *accept) {
+    size_t n = 0;
+    while (s[n] && strchr(accept, s[n])) n++;
+    return n;
+}
+
+size_t strcspn(const char *s, const char *reject) {
+    size_t n = 0;
+    while (s[n] && !strchr(reject, s[n])) n++;
+    return n;
+}
+
+char *strpbrk(const char *s, const char *accept) {
+    while (*s) {
+        if (strchr(accept, *s)) return (char *)s;
+        s++;
+    }
+    return NULL;
+}
+
+void qsort(void *base, size_t count, size_t size,
+           int (*compare)(const void *, const void *)) {
+    uint8_t *items = (uint8_t *)base;
+    uint8_t tmp[256];
+    if (size > sizeof(tmp)) return;
+    for (size_t i = 1; i < count; i++) {
+        memcpy(tmp, items + i * size, size);
+        size_t j = i;
+        while (j > 0 && compare(items + (j - 1) * size, tmp) > 0) {
+            memcpy(items + j * size, items + (j - 1) * size, size);
+            j--;
+        }
+        memcpy(items + j * size, tmp, size);
+    }
 }
 
 char *strdup(const char *s) {

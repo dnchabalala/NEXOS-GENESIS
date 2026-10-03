@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$SCRIPT_DIR/.."
 BUILD_DIR="$ROOT_DIR/build"
 ISO_DIR="$BUILD_DIR/iso"
-KERNEL="$BUILD_DIR/nexos.kernel"
+KERNEL="${KERNEL:-$BUILD_DIR/nexos.kernel}"
 ISO="$BUILD_DIR/nexos.iso"
 
 echo "[build_iso.sh] Creating ISO structure..."

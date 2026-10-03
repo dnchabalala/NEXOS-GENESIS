@@ -46,6 +46,8 @@ static void dns_udp_handler(uint32_t src_ip, uint16_t src_port,
     (void)src_ip; (void)src_port;
     if (len < 12) return;
     uint16_t txid = (uint16_t)((data[0] << 8) | data[1]);
+    klog(LOG_INFO, "DNS: UDP response len=%u txid=0x%x expected=0x%x",
+         len, txid, dns_txid);
     if (txid != dns_txid) return;
     if (!(data[2] & 0x80)) return;                /* not a response */
     uint16_t qdcount = (uint16_t)((data[4] << 8) | data[5]);
@@ -101,7 +103,10 @@ int dns_resolve(const char *hostname, uint8_t ip_out[4]) {
     dns_got_reply = 0;
     udp_register(DNS_SRC_PORT, dns_udp_handler);
 
-    klog(LOG_INFO, "DNS: querying %s ...", hostname);
+    uint32_t tx_before = rtl8139_get_tx_count();
+    uint32_t rx_before = rtl8139_get_rx_count();
+    klog(LOG_INFO, "DNS: querying %s ... tx=%u rx=%u", hostname,
+         tx_before, rx_before);
     if (!eth_dns_ip || udp_send(eth_dns_ip, DNS_SRC_PORT, DNS_PORT,
                  pkt, (uint16_t)pos) < 0) {
         udp_unregister(DNS_SRC_PORT);
@@ -125,6 +130,8 @@ int dns_resolve(const char *hostname, uint8_t ip_out[4]) {
     }
 
     udp_unregister(DNS_SRC_PORT);
-    klog(LOG_WARN, "DNS: timeout for %s", hostname);
+    klog(LOG_WARN, "DNS: timeout for %s tx=%u(+%u) rx=%u(+%u)", hostname,
+         rtl8139_get_tx_count(), rtl8139_get_tx_count() - tx_before,
+         rtl8139_get_rx_count(), rtl8139_get_rx_count() - rx_before);
     return -1;
 }

@@ -9,6 +9,7 @@ typedef struct {
     uint32_t body_len;
     uint8_t *body;    /* kmalloc'd; caller must call http_free */
     char     location[256]; /* Location header for redirects, if present */
+    char     content_type[128]; /* Content-Type header, if present */
 } http_response_t;
 
 /* Fetch a URL via HTTP GET.
