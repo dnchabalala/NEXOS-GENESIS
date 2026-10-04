@@ -8,6 +8,7 @@
 #include "wm.h"
 #include "../drivers/fb.h"
 #include "../drivers/font.h"
+#include "../kernel.h"
 #include <stdint.h>
 #include <stddef.h>
 
@@ -162,6 +163,8 @@ void launcher_tick(uint32_t delta_ms) {
 /* ── Public API ──────────────────────────────────────────────────────────── */
 void launcher_show(int x, int y) {
     (void)x; (void)y;
+    klog(LOG_DEBUG, "APPS ACTION toggle requested visible=%d closing=%d",
+         launcher_visible, launcher_closing);
     panel_x = ((int)fb.width  - PANEL_W) / 2;
     panel_y = ((int)fb.height - PANEL_H) / 2;
     if (panel_y < 4) panel_y = 4;
@@ -173,6 +176,7 @@ void launcher_show(int x, int y) {
     hover_shutdown   = 0;
     for (int i = 0; i < APP_COUNT; i++) card_glow[i] = 0;
     fb_scene_dirty   = 1;
+    klog(LOG_DEBUG, "APPS STATE visible=1 closing=0");
 }
 
 void launcher_hide(void) {
@@ -187,6 +191,13 @@ int launcher_is_visible(void) {
 
 void launcher_draw(void) {
     if (!launcher_visible && !launcher_closing) return;
+
+    static int paint_diag_budget = 2;
+    if (paint_diag_budget > 0) {
+        klog(LOG_DEBUG, "APPS PAINT visible=%d closing=%d anim=%d",
+             launcher_visible, launcher_closing, laun_anim);
+        paint_diag_budget--;
+    }
 
     /* ── Animation values ── */
     int   p_open  = anim_ease_out_cubic(laun_anim);

@@ -4,6 +4,7 @@
 
 typedef struct {
     uint32_t *addr;
+    uint32_t *draw_addr;
     uint32_t  width;
     uint32_t  height;
     uint32_t  pitch;
@@ -58,6 +59,14 @@ extern uint32_t col_sky;
 
 void     fb_init(uint64_t addr, uint32_t w, uint32_t h,
                  uint32_t pitch, uint8_t bpp);
+/* Enable the GUI render target after early console/framebuffer users have
+ * finished.  Drawing then happens off-screen until fb_commit(). */
+int      fb_enable_backbuffer(void);
+void     fb_commit(void);
+uint32_t *fb_draw_addr(void);
+void     fb_set_clip(int x, int y, int w, int h);
+void     fb_reset_clip(void);
+int      fb_clip_contains(int x, int y);
 void     fb_put_pixel(int x, int y, uint32_t color);
 uint32_t fb_get_pixel(int x, int y);
 void     fb_fill_rect(int x, int y, int w, int h, uint32_t color);

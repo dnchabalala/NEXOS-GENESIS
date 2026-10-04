@@ -48,7 +48,7 @@ static int nexos_initialise(nsfb_t *surface) {
         return -1;
 
     /* NetSurf's 32bpp XRGB plotter writes directly into NexOS VRAM. */
-    surface->ptr = (uint8_t *)fb.addr;
+    surface->ptr = (uint8_t *)fb_draw_addr();
     surface->linelen = (int)fb.pitch;
     return 0;
 }

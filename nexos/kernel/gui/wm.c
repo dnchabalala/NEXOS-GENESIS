@@ -1,6 +1,5 @@
 /* NexOS — kernel/gui/wm.c | Window Manager | MIT License */
 #include "wm.h"
-#include "anim.h"
 #include "desktop.h"
 #include "../drivers/fb.h"
 #include "../drivers/font.h"
@@ -18,6 +17,7 @@ static window_t *wins[WM_MAX_WINDOWS];
 static int       win_count = 0;
 static int       next_id   = 1;
 static window_t *focused_win = NULL;
+static int       wm_left_down = 0;
 
 /* ── Internal helpers ────────────────────────────────────────────────────── */
 static void strncpy_s(char *d, const char *s, int n) {
@@ -36,6 +36,14 @@ static int point_in_circle(int px, int py, int cx, int cy, int r) {
 
 static void wm_draw_window(window_t *win) {
     if (!win->visible || win->state == WIN_MINIMIZED) return;
+
+    /* Every window is composed in a bounded paint phase.  This prevents an
+     * application or NetSurf plotter from touching the titlebar, taskbar, or
+     * a neighbouring window while the WM is rebuilding the scene. */
+    fb_reset_clip();
+    fb_set_clip(win->x - WM_SHADOW_OFF - 4, win->y - WM_SHADOW_OFF - 4,
+                win->w + WM_SHADOW_OFF * 2 + 8,
+                win->h + WM_SHADOW_OFF * 2 + 8);
 
     /* ── 3-layer graduated drop shadow ─────────────────────────────────── */
     fb_fill_rect_blend(win->x + 10, win->y + 10, win->w, win->h, 0x000000, 42);
@@ -99,19 +107,47 @@ static void wm_draw_window(window_t *win) {
     font_puts(tx, ty, win->title, COL_TEXT, tb_col);
 
     /* ── Client area ────────────────────────────────────────────────────── */
+    fb_set_clip(win->x, win->y + WM_TITLEBAR_H,
+                win->w, win->h - WM_TITLEBAR_H);
     fb_fill_rect(win->x, win->y + WM_TITLEBAR_H,
                  win->w, win->h - WM_TITLEBAR_H, COL_MANTLE);
     /* Hairline separator between titlebar and content */
     fb_fill_rect(win->x, win->y + WM_TITLEBAR_H, win->w, 1, COL_SURFACE1);
 
     if (win->on_paint) win->on_paint(win);
+    fb_reset_clip();
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
 void wm_init(void) {
-    win_count = 0; next_id = 1; focused_win = NULL;
+    win_count = 0; next_id = 1; focused_win = NULL; wm_left_down = 0;
     for (int i = 0; i < WM_MAX_WINDOWS; i++) wins[i] = NULL;
     klog(LOG_INFO, "WM: initialized");
+}
+
+void wm_debug_report(void) {
+    int duplicate_ptrs = 0;
+    int duplicate_ids = 0;
+
+    for (int i = 0; i < win_count; i++) {
+        if (!wins[i]) continue;
+        for (int j = i + 1; j < win_count; j++) {
+            if (wins[i] == wins[j]) duplicate_ptrs++;
+            if (wins[i]->id == wins[j]->id) duplicate_ids++;
+        }
+    }
+
+    klog(LOG_INFO, "WM STARTUP windows=%d duplicate_ptrs=%d duplicate_ids=%d",
+         win_count, duplicate_ptrs, duplicate_ids);
+    for (int i = 0; i < win_count; i++) {
+        window_t *win = wins[i];
+        if (!win) {
+            klog(LOG_WARN, "WM WINDOW index=%d null", i);
+            continue;
+        }
+        klog(LOG_INFO, "WM WINDOW index=%d id=%d title=%s state=%d visible=%d",
+             i, win->id, win->title, (int)win->state, (int)win->visible);
+    }
 }
 
 window_t *wm_new(int x, int y, int w, int h, const char *title) {
@@ -128,7 +164,11 @@ window_t *wm_new(int x, int y, int w, int h, const char *title) {
     win->visible = 1;
     win->focused = 0;
     win->id      = next_id++;
-    win->anim_frames = 8;   /* pop-in over 8 frames (~264 ms at 30 fps) */
+    /* Do not mutate live window geometry during paint.  The old pop-in
+     * animation temporarily changed x/y/w/h while application callbacks
+     * were executing, which made clipping and NetSurf viewport state race
+     * with composition. */
+    win->anim_frames = 0;
     win->orig_x = x; win->orig_y = y;
     win->orig_w = w; win->orig_h = h;
     /* insert at front (top of z-order) */
@@ -136,7 +176,6 @@ window_t *wm_new(int x, int y, int w, int h, const char *title) {
     wins[0] = win;
     win_count++;
     wm_focus(win);
-    fb_scene_dirty = 1;   /* new window exposes desktop — need full repaint */
     return win;
 }
 
@@ -144,10 +183,6 @@ void wm_close(window_t *win) {
     if (!win) return;
     for (int i = 0; i < win_count; i++) {
         if (wins[i] == win) {
-            /* paint desktop over the area this window occupied */
-            desktop_paint_rect(win->x - 2, win->y - 2,
-                               win->w + WM_SHADOW_OFF + 4,
-                               win->h + WM_SHADOW_OFF + 4);
             for (int j = i; j < win_count - 1; j++) wins[j] = wins[j + 1];
             wins[win_count - 1] = NULL;
             win_count--;
@@ -180,10 +215,6 @@ void wm_raise(window_t *win) {
 }
 
 void wm_minimize(window_t *win) {
-    /* paint desktop over the area this window occupied */
-    desktop_paint_rect(win->x - 2, win->y - 2,
-                       win->w + WM_SHADOW_OFF + 4,
-                       win->h + WM_SHADOW_OFF + 4);
     win->state = WIN_MINIMIZED;
     if (focused_win == win) {
         for (int i = 0; i < win_count; i++) {
@@ -208,57 +239,54 @@ void wm_toggle_maximize(window_t *win) {
         win->h = (int)fb.height - 40;
         win->state = WIN_MAXIMIZED;
     }
+    if (win->on_resize) win->on_resize(win);
     fb_scene_dirty = 1;   /* layout changed — full repaint */
 }
 
-void wm_move(window_t *win, int x, int y) { win->x = x; win->y = y; }
+void wm_move(window_t *win, int x, int y) {
+    if (!win) return;
+    win->x = x; win->y = y;
+    fb_scene_dirty = 1;
+}
 void wm_resize(window_t *win, int w, int h) {
     win->w = w; win->h = h;
     win->client_w = w;
     win->client_h = h - WM_TITLEBAR_H;
+    if (win->on_resize) win->on_resize(win);
+    fb_scene_dirty = 1;
 }
-void wm_invalidate(window_t *win) { (void)win; /* redrawn every frame */ }
+void wm_invalidate(window_t *win) {
+    (void)win;
+    /* Applications request repaint through the normal frame composition.
+     * This must not dirty the desktop background: NetSurf status/content
+     * updates are frequent and should not trigger an animated full-screen
+     * repaint. */
+}
 
 void wm_render_all(void) {
     /* draw back-to-front */
+    static int compose_reported = 0;
+    int visible = 0;
+    int painted = 0;
     for (int i = win_count - 1; i >= 0; i--) {
         window_t *win = wins[i];
         if (!win || !win->visible || win->state == WIN_MINIMIZED) continue;
 
-        if (win->anim_frames > 0) {
-            /* Pop-in: window scales from ~72% to 100% using ease-out-back.
-             * progress = (8 - frames) * 32  →  0, 32, 64 … 256 over 8 frames */
-            int progress = (8 - win->anim_frames) * 32;
-            int eased    = anim_ease_out_back(progress);  /* 0-280 with overshoot */
-            /* scale: map eased (0-256) onto 185-256 (72%→100%) */
-            int scale = 185 + eased * 71 / 280;
-            scale = anim_clamp(scale, 64, 256);
-
-            /* Temporarily shrink window geometry for this draw call */
-            int ox = win->x, oy = win->y, ow = win->w, oh = win->h;
-            int dw = ow * (256 - scale) / 512;
-            int dh = oh * (256 - scale) / 512;
-            win->x += dw; win->y += dh;
-            win->w -= dw * 2; win->h -= dh * 2;
-            if (win->w < 4) win->w = 4;
-            if (win->h < 4) win->h = 4;
-
-            wm_draw_window(win);
-
-            /* Restore real geometry */
-            win->x = ox; win->y = oy; win->w = ow; win->h = oh;
-            win->anim_frames--;
-        } else {
-            wm_draw_window(win);
-        }
+        visible++;
+        wm_draw_window(win);
+        painted++;
+    }
+    if (!compose_reported) {
+        klog(LOG_INFO, "GUI COMPOSE visible_windows=%d painted_windows=%d",
+             visible, painted);
+        compose_reported = 1;
     }
 }
 
 void wm_handle_mouse(int x, int y, int left, int right) {
     (void)right;
-    static int prev_left = 0;
-    int pressed = left && !prev_left;
-    prev_left = left;
+    int pressed = left && !wm_left_down;
+    wm_left_down = left ? 1 : 0;
 
     if (focused_win && focused_win->dragging && left) {
         int nx = x - focused_win->drag_ox;
@@ -270,14 +298,30 @@ void wm_handle_mouse(int x, int y, int left, int right) {
         if (ny + focused_win->h > (int)fb.height - 40)
             ny = (int)fb.height - 40 - focused_win->h;
         if (nx != focused_win->x || ny != focused_win->y) {
-            /* surgically repaint desktop over the OLD window footprint
-               (shadow + border padding) before the window moves */
-            desktop_paint_rect(focused_win->x - 2, focused_win->y - 2,
-                               focused_win->w + WM_SHADOW_OFF + 6,
-                               focused_win->h + WM_SHADOW_OFF + 6);
             wm_move(focused_win, nx, ny);
         }
         return;
+    }
+
+    /* Movement is a separate frontend event from a button press.  Deliver
+     * it to the topmost window under the pointer so browsers can perform
+     * real NetSurf hover/hit testing without receiving toolbar coordinates. */
+    for (int i = 0; i < win_count; i++) {
+        window_t *win = wins[i];
+        if (!win || !win->visible || win->state == WIN_MINIMIZED ||
+            win->on_mouse_move == NULL) continue;
+        if (point_in_rect(x, y, win->x, win->y + WM_TITLEBAR_H,
+                          win->w, win->h - WM_TITLEBAR_H)) {
+            win->on_mouse_move(win, x - win->x,
+                               y - win->y - WM_TITLEBAR_H);
+            static int move_diag_budget = 8;
+            if (move_diag_budget > 0) {
+                klog(LOG_DEBUG, "INPUT WM move x=%d y=%d window=%s",
+                     x, y, win->title);
+                move_diag_budget--;
+            }
+            break;
+        }
     }
 
     if (!pressed) return;
@@ -327,9 +371,31 @@ void wm_handle_mouse(int x, int y, int left, int right) {
 
 void wm_handle_mouse_release(int x, int y) {
     (void)x; (void)y;
+    wm_left_down = 0;
     if (focused_win && focused_win->dragging) {
         focused_win->dragging = 0;
         fb_scene_dirty = 1;  /* one final full repaint to clean up any artifacts */
+    }
+}
+
+void wm_handle_mouse_wheel(int x, int y, int delta) {
+    if (delta == 0) return;
+    for (int i = 0; i < win_count; i++) {
+        window_t *win = wins[i];
+        if (!win || !win->visible || win->state == WIN_MINIMIZED ||
+            win->on_mouse_wheel == NULL) continue;
+        if (point_in_rect(x, y, win->x, win->y + WM_TITLEBAR_H,
+                          win->w, win->h - WM_TITLEBAR_H)) {
+            win->on_mouse_wheel(win, x - win->x,
+                                y - win->y - WM_TITLEBAR_H, delta);
+            static int wheel_diag_budget = 8;
+            if (wheel_diag_budget > 0) {
+                klog(LOG_DEBUG, "INPUT WM wheel x=%d y=%d delta=%d window=%s",
+                     x, y, delta, win->title);
+                wheel_diag_budget--;
+            }
+            return;
+        }
     }
 }
 

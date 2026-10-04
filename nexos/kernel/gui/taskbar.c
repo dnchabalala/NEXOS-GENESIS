@@ -17,6 +17,9 @@
 #define TB_BTN_W  80    /* "Apps" button width */
 #define TB_WIN_W  120   /* window pill width */
 #define TB_WIN_STEP 128 /* stride between window pills */
+#define TB_APPS_X    8
+#define TB_APPS_H    28
+#define TB_APPS_YOFF 6
 
 static int tb_y;
 
@@ -32,6 +35,13 @@ void taskbar_init(void) {
 }
 
 int taskbar_get_y(void) { return tb_y; }
+
+void taskbar_get_apps_rect(int *x, int *y, int *w, int *h) {
+    if (x) *x = TB_APPS_X;
+    if (y) *y = tb_y + TB_APPS_YOFF;
+    if (w) *w = TB_BTN_W;
+    if (h) *h = TB_APPS_H;
+}
 
 void taskbar_handle_mouse(int mx, int my) {
     tb_hover_mx = mx;
@@ -65,9 +75,19 @@ void taskbar_draw(void) {
     if (!fb.initialized) return;
     tb_y = (int)fb.height - TB_H;
 
+    static int paint_report_budget = 2;
+    if (paint_report_budget > 0) {
+        klog(LOG_INFO, "TASKBAR PAINT y=%d h=%d apps_rect=(%d,%d,%d,%d) windows=%d",
+             tb_y, TB_H, TB_APPS_X, tb_y + TB_APPS_YOFF,
+             TB_BTN_W, TB_APPS_H, wm_window_count());
+        paint_report_budget--;
+    }
+
     /* ── Animate hover glow (advance every draw call ~30fps) ── */
-    int over_apps = (tb_hover_my >= tb_y &&
-                     tb_hover_mx >= 8 && tb_hover_mx < 8 + TB_BTN_W);
+    int over_apps = (tb_hover_my >= tb_y + TB_APPS_YOFF &&
+                     tb_hover_my < tb_y + TB_APPS_YOFF + TB_APPS_H &&
+                     tb_hover_mx >= TB_APPS_X &&
+                     tb_hover_mx < TB_APPS_X + TB_BTN_W);
     if (over_apps) tb_apps_glow = anim_clamp(tb_apps_glow + 18, 0, 256);
     else           tb_apps_glow = anim_clamp(tb_apps_glow - 14, 0, 256);
 
@@ -88,13 +108,15 @@ void taskbar_draw(void) {
     /* ── Apps button with hover glow ── */
     uint32_t apps_bg  = anim_color_lerp(0x252645, 0x3A3B72, tb_apps_glow);
     uint32_t apps_rim = anim_color_lerp(0x4A4B7A, 0x8888CC, tb_apps_glow);
-    fb_fill_rounded_rect(8, tb_y + 6, TB_BTN_W, 28, 8, apps_bg);
-    fb_draw_rect_outline(8, tb_y + 6, TB_BTN_W, 28, apps_rim, 1);
+    fb_fill_rounded_rect(TB_APPS_X, tb_y + TB_APPS_YOFF,
+                         TB_BTN_W, TB_APPS_H, 8, apps_bg);
+    fb_draw_rect_outline(TB_APPS_X, tb_y + TB_APPS_YOFF,
+                         TB_BTN_W, TB_APPS_H, apps_rim, 1);
     /* Glow under-line */
     if (tb_apps_glow > 20)
-        fb_fill_rect_blend(8, tb_y + 33, TB_BTN_W, 2, COL_BLUE,
+        fb_fill_rect_blend(TB_APPS_X, tb_y + 33, TB_BTN_W, 2, COL_BLUE,
                            (uint8_t)(tb_apps_glow * 180 / 256));
-    font_puts(18, tb_y + 13, "Apps", COL_BLUE, apps_bg);
+    font_puts(TB_APPS_X + 10, tb_y + 13, "Apps", COL_BLUE, apps_bg);
 
     /* ── Window list pills ── */
     int bx = 100;
@@ -169,8 +191,18 @@ void taskbar_draw(void) {
 }
 
 void taskbar_handle_click(int x, int y) {
+    int apps_x, apps_y, apps_w, apps_h;
+    taskbar_get_apps_rect(&apps_x, &apps_y, &apps_w, &apps_h);
+    int inside_apps = x >= apps_x && x < apps_x + apps_w &&
+                      y >= apps_y && y < apps_y + apps_h;
+    klog(LOG_DEBUG,
+         "TASKBAR INPUT event=DOWN mouse=(%d,%d) apps_rect=(%d,%d,%d,%d) inside_apps=%s",
+         x, y, apps_x, apps_y, apps_w, apps_h,
+         inside_apps ? "yes" : "no");
     if (y < tb_y) return;
-    if (x >= 8 && x < 8 + TB_BTN_W) {
+    if (inside_apps) {
+        klog(LOG_DEBUG, "WM HIT target=TASKBAR_APPS x=%d y=%d action=toggle_launcher",
+             x, y);
         if (launcher_is_visible()) launcher_hide();
         else launcher_show(8, tb_y);
         return;

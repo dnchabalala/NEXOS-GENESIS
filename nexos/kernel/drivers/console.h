@@ -8,5 +8,9 @@ void console_puts(const char *s);
 void console_printf(const char *fmt, ...);
 void console_set_color(uint32_t fg, uint32_t bg);
 void console_clear(void);
+/* Disable framebuffer console drawing after the GUI owns the display.
+ * Logging itself continues through the serial sink. */
+void console_set_display_enabled(int enabled);
+int  console_display_enabled(void);
 void console_set_pos(int x, int y);
 void console_get_pos(int *x, int *y);

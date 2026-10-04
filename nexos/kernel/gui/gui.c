@@ -17,7 +17,9 @@
 #include "snake_app.h"
 #include "sysmon_app.h"
 #include "settings_app.h"
+#include "../../ports/netsurf/compat/nexos_frontend.h"
 #include "../drivers/fb.h"
+#include "../drivers/console.h"
 #include "../drivers/font.h"
 #include "../drivers/mouse.h"
 #include "../drivers/rtl8139.h"
@@ -25,16 +27,6 @@
 #include "../drivers/timer.h"
 #include "../kernel.h"
 
-#ifdef NEXOS_NATIVE_NETSURF_TEST
-#include "../../ports/netsurf/src/netsurf/utils/errors.h"
-#include "../../ports/netsurf/src/netsurf/include/netsurf/browser_window.h"
-extern nserror nexos_netsurf_init(void);
-extern nserror nexos_netsurf_open_url(const char *address,
-                                      struct browser_window **out);
-extern nserror nexos_netsurf_open_blank(struct browser_window **out);
-extern void nexos_netsurf_pump(void);
-extern void nexos_netsurf_schedule_url(const char *address, int delay_ms);
-#endif
 
 /* ── Launch helpers (called from launcher.c) ─────────────────────────────── */
 static int term_count  = 0;
@@ -140,43 +132,42 @@ void gui_main(void) {
         return;
     }
 
+    /* Early console output used the physical framebuffer directly.  From
+     * the GUI phase onward, compose complete frames off-screen and commit
+     * them once, so cursor/window/NetSurf paints cannot expose intermediate
+     * states on scanout. */
+    if (!fb_enable_backbuffer())
+        klog(LOG_WARN, "GUI: backbuffer unavailable; using direct framebuffer");
+
+    /* From this point onward the physical display is owned by the GUI
+     * compositor.  klog continues to serial, but the legacy framebuffer
+     * text console must no longer write into the GUI backbuffer. */
+    console_set_display_enabled(0);
+
     /* 1. Init subsystems */
     mouse_init();
     wm_init();
     taskbar_init();
     notif_init();
 
-#ifdef NEXOS_NATIVE_NETSURF_TEST
-    {
-        struct browser_window *netsurf_window = NULL;
-        nserror error = nexos_netsurf_init();
-        klog(error == NSERROR_OK ? LOG_INFO : LOG_ERROR,
-             "NETSURF INIT %s error=%d",
-             error == NSERROR_OK ? "PASS" : "FAIL", (int)error);
-        if (error == NSERROR_OK) {
-            error = nexos_netsurf_open_blank(&netsurf_window);
-            klog(error == NSERROR_OK ? LOG_INFO : LOG_ERROR,
-                 "NETSURF CONTEXT %s error=%d",
-                 error == NSERROR_OK ? "PASS" : "FAIL", (int)error);
-            klog(netsurf_window != NULL ? LOG_INFO : LOG_ERROR,
-                 "NETSURF SURFACE %s",
-                 netsurf_window != NULL ? "PASS" : "FAIL");
-            nexos_netsurf_schedule_url("https://nexos.dnchabalala.site/", 3000);
-        }
-    }
-#endif
-
-    /* 2. Draw initial desktop */
-    fb_clear(COL_BASE);
-    desktop_draw();
-    taskbar_draw();
-
-    /* 3. Open startup windows */
+    /* 2. Create the intended startup applications before the first commit.
+     * The first visible frame must already be a complete composed scene,
+     * rather than a desktop-only frame followed by a second scene. */
     term_create(60,  60);
     files_create(560, 80);
 
+    wm_debug_report();
+
     /* Welcome notification */
     notif_show("NexOS", "Welcome to NexOS 0.1", 4000);
+
+    /* 3. Draw and commit the complete initial desktop exactly once. */
+    fb_clear(COL_BASE);
+    desktop_draw();
+    wm_render_all();
+    taskbar_draw();
+    notif_draw();
+    fb_commit();
 
     klog(LOG_INFO, "GUI: entering main loop");
 
@@ -189,16 +180,23 @@ void gui_main(void) {
     int      prev_mx      = -1;
     int      prev_my      = -1;
     int      ctrl_held    = 0;
+    int      input_diag_budget = 24;
+    int      button_diag_budget = 12;
+    int      dispatch_diag_budget = 12;
 
     while (1) {
         uint64_t now = timer_get_ticks();
 
+        /* The cursor is an overlay on the previous complete frame.  Remove
+         * it before networking, input callbacks, or application work can
+         * repaint the surface underneath it. */
+        fb_reset_clip();
+        cursor_restore();
+
         /* Process NIC packets outside interrupt context.  The RTL8139 IRQ
          * only marks RX work pending because the network stack allocates. */
         rtl8139_service();
-#ifdef NEXOS_NATIVE_NETSURF_TEST
         nexos_netsurf_pump();
-#endif
 
         /* ── Keyboard events ────────────────────────────────────────────── */
         while (keyboard_available()) {
@@ -253,11 +251,38 @@ void gui_main(void) {
         int my    = mouse_get_y();
         int left  = mouse_left();
         int right = mouse_right();
+        int wheel = mouse_get_wheel();
+        int packet_dx, packet_dy, packet_buttons, packet_wheel;
+        int button_old, button_new, button_raw;
         int tb_y  = taskbar_get_y();
+
+        if (input_diag_budget > 0 &&
+            mouse_take_debug(&packet_dx, &packet_dy, &packet_buttons,
+                             &packet_wheel)) {
+            klog(LOG_DEBUG, "INPUT PS2 dx=%d dy=%d buttons=%d wheel=%d",
+                 packet_dx, packet_dy, packet_buttons, packet_wheel);
+            input_diag_budget--;
+        }
+
+        if (button_diag_budget > 0 &&
+            mouse_take_button_debug(&button_old, &button_new, &button_raw)) {
+            klog(LOG_DEBUG,
+                 "INPUT BUTTON raw0=0x%x old=%d new=%d left=%d right=%d middle=%d",
+                 button_raw, button_old, button_new,
+                 button_new & 1, (button_new >> 1) & 1,
+                 (button_new >> 2) & 1);
+            button_diag_budget--;
+        }
 
         int left_click  = left  && !prev_left;
         int right_click = right && !prev_right;
         int released    = !left && prev_left;
+
+        if (dispatch_diag_budget > 0 && (left_click || released)) {
+            klog(LOG_DEBUG, "GUI BUTTON event=%s x=%d y=%d left=%d right=%d",
+                 left_click ? "DOWN" : "UP", mx, my, left, right);
+            dispatch_diag_budget--;
+        }
 
         if (left_click || right_click || mx != prev_mx || my != prev_my) {
             /* Forward mouse position to launcher for hover highlighting */
@@ -279,6 +304,7 @@ void gui_main(void) {
             prev_mx = mx; prev_my = my;
         }
         if (released) wm_handle_mouse_release(mx, my);
+        if (wheel != 0) wm_handle_mouse_wheel(mx, my, wheel);
         prev_left  = left;
         prev_right = right;
 
@@ -286,9 +312,6 @@ void gui_main(void) {
         if (now - last_frame >= 33) {
             uint32_t frame_ms = (uint32_t)(now - last_frame);
             last_frame = now;
-
-            /* Restore cursor FIRST so all drawing happens on a clean fb */
-            cursor_restore();
 
             /* Advance launcher open/close animation */
             launcher_tick(frame_ms);
@@ -306,6 +329,8 @@ void gui_main(void) {
 
             /* Draw cursor on top of everything */
             cursor_draw(mx, my);
+            /* One bounded scanout update prevents visible partial frames. */
+            fb_commit();
         }
 
         /* ── Clock update every second ──────────────────────────────────── */

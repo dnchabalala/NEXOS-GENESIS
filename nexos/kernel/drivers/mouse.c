@@ -13,7 +13,20 @@ static volatile int     mouse_tx;
 static volatile int     mouse_ty;
 static volatile uint8_t mouse_btns;
 static volatile uint8_t mouse_cycle;
-static uint8_t mouse_bytes[3];
+static uint8_t mouse_bytes[4];
+static int mouse_packet_size = 3;
+static volatile int mouse_wheel_delta;
+static volatile uint32_t mouse_packet_seq;
+static volatile uint32_t mouse_debug_seq;
+static volatile int mouse_last_dx;
+static volatile int mouse_last_dy;
+static volatile int mouse_last_wheel;
+static volatile int mouse_last_buttons;
+static volatile int mouse_button_old;
+static volatile int mouse_button_new;
+static volatile int mouse_button_raw;
+static volatile uint32_t mouse_button_seq;
+static volatile uint32_t mouse_button_debug_seq;
 static volatile int mouse_needs_redraw = 0;
 
 /* ── Cursor ─────────────────────────────────────────────────────────────── */
@@ -71,9 +84,16 @@ static void mouse_irq_handler(registers_t *r) {
     /* byte 0 must have bit3 set */
     if (mouse_cycle == 0 && !(b & 0x08)) return;
     mouse_bytes[mouse_cycle++] = b;
-    if (mouse_cycle == 3) {
+    if (mouse_cycle == (uint8_t)mouse_packet_size) {
         mouse_cycle = 0;
+        int old_buttons = mouse_btns;
         mouse_btns = mouse_bytes[0] & 0x07;
+        if (mouse_btns != old_buttons) {
+            mouse_button_old = old_buttons;
+            mouse_button_new = mouse_btns;
+            mouse_button_raw = mouse_bytes[0];
+            mouse_button_seq++;
+        }
         int dx = (int)(int8_t)mouse_bytes[1];
         int dy = -(int)(int8_t)mouse_bytes[2];
         /* Clamp hardware overflow first */
@@ -84,6 +104,18 @@ static void mouse_irq_handler(registers_t *r) {
         dy = dy * 2 + (dy > 5 ? dy / 2 : dy < -5 ? dy / 2 : 0);
         mouse_tx += dx;
         mouse_ty += dy;
+        if (mouse_packet_size == 4) {
+            int wheel = mouse_bytes[3] & 0x0f;
+            if (wheel & 0x08) wheel -= 16;
+            mouse_wheel_delta += wheel;
+            mouse_last_wheel = wheel;
+        } else {
+            mouse_last_wheel = 0;
+        }
+        mouse_last_dx = dx;
+        mouse_last_dy = dy;
+        mouse_last_buttons = mouse_btns;
+        mouse_packet_seq++;
         if (mouse_tx < 0) mouse_tx = 0;
         if (mouse_ty < 0) mouse_ty = 0;
         if (fb.initialized) {
@@ -100,7 +132,12 @@ void mouse_init(void) {
     mouse_y = (int)(fb.initialized ? fb.height / 2 : 384);
     mouse_tx = mouse_x;
     mouse_ty = mouse_y;
-    mouse_cycle = 0; mouse_btns = 0;
+    mouse_cycle = 0; mouse_btns = 0; mouse_wheel_delta = 0;
+    mouse_packet_seq = 0; mouse_debug_seq = 0;
+    mouse_last_dx = 0; mouse_last_dy = 0;
+    mouse_last_wheel = 0; mouse_last_buttons = 0;
+    mouse_button_old = 0; mouse_button_new = 0; mouse_button_raw = 0;
+    mouse_button_seq = 0; mouse_button_debug_seq = 0;
 
     mouse_wait_write(); io_outb(0x64, 0xA8);
     mouse_wait_write(); io_outb(0x64, 0x20);
@@ -109,10 +146,23 @@ void mouse_init(void) {
     mouse_wait_write(); io_outb(0x64, 0x60);
     mouse_wait_write(); io_outb(0x60, status);
     mouse_write(0xF6); mouse_read();
+
+    /* Negotiate the standard IntelliMouse extension.  A normal PS/2
+     * device remains a three-byte device; QEMU and common hardware expose
+     * wheel support as ID 3 after this sample-rate sequence. */
+    mouse_write(0xF3); mouse_read(); mouse_write(200); mouse_read();
+    mouse_write(0xF3); mouse_read(); mouse_write(100); mouse_read();
+    mouse_write(0xF3); mouse_read(); mouse_write(80);  mouse_read();
+    mouse_write(0xF2); mouse_read();
+    {
+        uint8_t id = mouse_read();
+        mouse_packet_size = (id == 3) ? 4 : 3;
+    }
     mouse_write(0xF4); mouse_read();
 
     irq_install_handler(12, mouse_irq_handler);
-    klog(LOG_INFO, "Mouse: PS/2 initialized");
+    klog(LOG_INFO, "Mouse: PS/2 initialized wheel=%s",
+         mouse_packet_size == 4 ? "yes" : "no");
 }
 
 int     mouse_get_x(void)    { return mouse_x; }
@@ -120,6 +170,31 @@ int     mouse_get_y(void)    { return mouse_y; }
 uint8_t mouse_get_btns(void) { return mouse_btns; }
 int     mouse_left(void)     { return mouse_btns & 1; }
 int     mouse_right(void)    { return mouse_btns & 2; }
+int mouse_get_wheel(void) {
+    int delta = mouse_wheel_delta;
+    mouse_wheel_delta = 0;
+    return delta;
+}
+int mouse_take_debug(int *dx, int *dy, int *buttons, int *wheel) {
+    uint32_t seq = mouse_packet_seq;
+    if (seq == mouse_debug_seq) return 0;
+    mouse_debug_seq = seq;
+    if (dx) *dx = mouse_last_dx;
+    if (dy) *dy = mouse_last_dy;
+    if (buttons) *buttons = mouse_last_buttons;
+    if (wheel) *wheel = mouse_last_wheel;
+    return 1;
+}
+int mouse_take_button_debug(int *old_buttons, int *new_buttons,
+                            int *raw_byte0) {
+    uint32_t seq = mouse_button_seq;
+    if (seq == mouse_button_debug_seq) return 0;
+    mouse_button_debug_seq = seq;
+    if (old_buttons) *old_buttons = mouse_button_old;
+    if (new_buttons) *new_buttons = mouse_button_new;
+    if (raw_byte0) *raw_byte0 = mouse_button_raw;
+    return 1;
+}
 int mouse_needs_update(void) {
     int changed = 0;
 

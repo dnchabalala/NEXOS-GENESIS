@@ -10,9 +10,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdarg.h>
+#include <string.h>
 
 #include "mm/heap.h"
 #include "gui/wm.h"
+#include "gui/browser_app.h"
 #include "drivers/fb.h"
 #include "drivers/font.h"
 #include "drivers/timer.h"
@@ -39,6 +41,8 @@ struct gui_window {
 	window_t *window;
 	int width;
 	int height;
+	int origin_x;
+	int origin_y;
 	int scroll_x;
 	int scroll_y;
 };
@@ -60,6 +64,60 @@ static int nexos_max(int a, int b) { return a > b ? a : b; }
 static unsigned long nexos_plot_rects;
 static unsigned long nexos_plot_texts;
 static unsigned long nexos_plot_bitmaps;
+static window_t *nexos_host_window;
+static int nexos_host_x;
+static int nexos_host_y;
+static int nexos_host_width;
+static int nexos_host_height;
+static struct gui_window *nexos_host_gui;
+
+void nexos_netsurf_bind_window(window_t *window, int x, int y,
+		int width, int height)
+{
+	nexos_host_window = window;
+	nexos_host_x = x;
+	nexos_host_y = y;
+	nexos_host_width = width;
+	nexos_host_height = height;
+}
+
+void nexos_netsurf_set_viewport(window_t *window, int x, int y,
+		int width, int height)
+{
+	if (window == NULL || window != nexos_host_window) return;
+	nexos_host_x = x;
+	nexos_host_y = y;
+	nexos_host_width = width;
+	nexos_host_height = height;
+	if (nexos_host_gui != NULL) {
+		nexos_host_gui->origin_x = x;
+		nexos_host_gui->origin_y = y;
+		nexos_host_gui->width = width;
+		nexos_host_gui->height = height;
+		browser_window_set_dimensions(nexos_host_gui->bw, width, height);
+	}
+}
+
+bool nexos_netsurf_scroll(window_t *window, int dx, int dy)
+{
+	if (window == NULL || window != nexos_host_window ||
+	    nexos_host_gui == NULL || nexos_host_gui->bw == NULL)
+		return false;
+	return browser_window_scroll_at_point(nexos_host_gui->bw, 1, 1, dx, dy);
+}
+
+void nexos_netsurf_mouse_track(window_t *window, int x, int y)
+{
+	static int diag_budget = 8;
+	if (window == NULL || window != nexos_host_window ||
+	    nexos_host_gui == NULL || nexos_host_gui->bw == NULL)
+		return;
+	browser_window_mouse_track(nexos_host_gui->bw, 0, x, y);
+	if (diag_budget > 0) {
+		klog(LOG_DEBUG, "INPUT NETSURF move x=%d y=%d", x, y);
+		diag_budget--;
+	}
+}
 
 static void nexos_clip_rect(const struct nexos_redraw *rd,
 		int *x0, int *y0, int *x1, int *y1)
@@ -97,12 +155,12 @@ static nserror nexos_plot_rectangle(const struct redraw_context *ctx,
 	if (style->fill_type != PLOT_OP_TYPE_NONE)
 		nexos_plot_rects++;
 	if (style->fill_type != PLOT_OP_TYPE_NONE)
-		fb_fill_rect(rd->gw->window->x + x0,
-				rd->gw->window->y + WM_TITLEBAR_H + y0,
+				fb_fill_rect(rd->gw->window->x + rd->gw->origin_x + x0,
+					rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + y0,
 				x1 - x0, y1 - y0, nexos_plot_colour(style->fill_colour));
 	if (style->stroke_type != PLOT_OP_TYPE_NONE) {
-		fb_draw_rect_outline(rd->gw->window->x + x0,
-				rd->gw->window->y + WM_TITLEBAR_H + y0,
+				fb_draw_rect_outline(rd->gw->window->x + rd->gw->origin_x + x0,
+					rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + y0,
 				x1 - x0, y1 - y0,
 				nexos_plot_colour(style->stroke_colour),
 				plot_style_fixed_to_int(style->stroke_width));
@@ -116,10 +174,10 @@ static nserror nexos_plot_line(const struct redraw_context *ctx,
 	struct nexos_redraw *rd = ctx->priv;
 	if (rd == NULL || style == NULL || line == NULL) return NSERROR_BAD_PARAMETER;
 	if (style->stroke_type != PLOT_OP_TYPE_NONE)
-		fb_draw_line(rd->gw->window->x + line->x0,
-				rd->gw->window->y + WM_TITLEBAR_H + line->y0,
-				rd->gw->window->x + line->x1,
-				rd->gw->window->y + WM_TITLEBAR_H + line->y1,
+				fb_draw_line(rd->gw->window->x + rd->gw->origin_x + line->x0,
+					rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + line->y0,
+					rd->gw->window->x + rd->gw->origin_x + line->x1,
+					rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + line->y1,
 				nexos_plot_colour(style->stroke_colour));
 	return NSERROR_OK;
 }
@@ -130,8 +188,8 @@ static nserror nexos_plot_disc(const struct redraw_context *ctx,
 	struct nexos_redraw *rd = ctx->priv;
 	if (rd == NULL || style == NULL) return NSERROR_BAD_PARAMETER;
 	if (style->fill_type != PLOT_OP_TYPE_NONE)
-		fb_fill_circle(rd->gw->window->x + x,
-			rd->gw->window->y + WM_TITLEBAR_H + y, radius,
+			fb_fill_circle(rd->gw->window->x + rd->gw->origin_x + x,
+				rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + y, radius,
 			nexos_plot_colour(style->fill_colour));
 	return NSERROR_OK;
 }
@@ -156,10 +214,10 @@ static nserror nexos_plot_polygon(const struct redraw_context *ctx,
 	if (style->stroke_type != PLOT_OP_TYPE_NONE) {
 		for (i = 0; i < n; i++) {
 			unsigned int j = (i + 1) % n;
-			fb_draw_line(rd->gw->window->x + p[i * 2],
-				rd->gw->window->y + WM_TITLEBAR_H + p[i * 2 + 1],
-				rd->gw->window->x + p[j * 2],
-				rd->gw->window->y + WM_TITLEBAR_H + p[j * 2 + 1],
+				fb_draw_line(rd->gw->window->x + rd->gw->origin_x + p[i * 2],
+					rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + p[i * 2 + 1],
+					rd->gw->window->x + rd->gw->origin_x + p[j * 2],
+					rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + p[j * 2 + 1],
 				nexos_plot_colour(style->stroke_colour));
 		}
 	}
@@ -196,8 +254,8 @@ static nserror nexos_plot_bitmap(const struct redraw_context *ctx,
 			sx = (dx * bm->width) / width;
 			c = bm->pixels[sy * bm->width + sx];
 			if ((c >> 24) != 0)
-				fb_put_pixel(rd->gw->window->x + px,
-					rd->gw->window->y + WM_TITLEBAR_H + py,
+				fb_put_pixel(rd->gw->window->x + rd->gw->origin_x + px,
+					rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + py,
 					c & 0x00ffffffu);
 		}
 	}
@@ -222,8 +280,8 @@ static nserror nexos_plot_text(const struct redraw_context *ctx,
 		if (ch == '\n') { px = x; y += 16; continue; }
 		if (ch < 0x80 && px + 8 > rd->clip.x0 && px < rd->clip.x1 &&
 				y - 12 < rd->clip.y1 && y + 4 >= rd->clip.y0)
-			font_putchar(rd->gw->window->x + px,
-				rd->gw->window->y + WM_TITLEBAR_H + y - 12,
+				font_putchar(rd->gw->window->x + rd->gw->origin_x + px,
+					rd->gw->window->y + WM_TITLEBAR_H + rd->gw->origin_y + y - 12,
 				(char)ch, fg, 0);
 		px += 8;
 	}
@@ -243,19 +301,20 @@ static const struct plotter_table nexos_plotters = {
 	.option_knockout = false,
 };
 
-static void nexos_window_paint(window_t *window)
+void nexos_netsurf_paint(window_t *window)
 {
 	struct gui_window *gw;
 	struct nexos_redraw rd;
 	struct redraw_context ctx;
 	struct rect clip;
 
-	if (window == NULL || window->userdata == NULL) return;
-	gw = window->userdata;
+	if (window == NULL || nexos_host_gui == NULL ||
+	    nexos_host_gui->window != window) return;
+	gw = nexos_host_gui;
 	clip.x0 = 0;
 	clip.y0 = 0;
 	clip.x1 = gw->width;
-	clip.y1 = gw->height - WM_TITLEBAR_H;
+	clip.y1 = gw->height;
 	rd.gw = gw;
 	rd.clip = clip;
 	ctx.interactive = true;
@@ -451,24 +510,35 @@ static struct gui_window *nexos_window_create(struct browser_window *bw,
 	gw = kmalloc(sizeof(*gw));
 	if (gw == NULL) return NULL;
 	gw->bw = bw;
-	gw->width = 720;
-	gw->height = 460;
+	gw->width = nexos_host_window != NULL ? nexos_host_width : 720;
+	gw->height = nexos_host_window != NULL ? nexos_host_height : 428;
+	gw->origin_x = nexos_host_window != NULL ? nexos_host_x : 0;
+	gw->origin_y = nexos_host_window != NULL ? nexos_host_y : 0;
 	gw->scroll_x = 0;
 	gw->scroll_y = 0;
-	gw->window = wm_new(80, 50, gw->width, gw->height, "NexOS Browser");
+	gw->window = nexos_host_window != NULL ? nexos_host_window :
+		wm_new(80, 50, 720, 460, "NexOS Browser");
 	if (gw->window == NULL) {
 		kfree(gw);
 		return NULL;
 	}
-	gw->window->userdata = gw;
-	gw->window->on_paint = nexos_window_paint;
+	nexos_host_gui = gw;
+	if (nexos_host_window == NULL) {
+		gw->window->userdata = gw;
+		gw->window->on_paint = nexos_netsurf_paint;
+	}
 	return gw;
 }
 
 static void nexos_window_destroy(struct gui_window *gw)
 {
 	if (gw == NULL) return;
-	if (gw->window != NULL) wm_close(gw->window);
+	if (gw == nexos_host_gui) {
+		nexos_host_gui = NULL;
+		nexos_host_window = NULL;
+	} else if (gw->window != NULL) {
+		wm_close(gw->window);
+	}
 	kfree(gw);
 }
 
@@ -515,6 +585,25 @@ static nserror nexos_window_event(struct gui_window *gw,
 	return NSERROR_OK;
 }
 
+static void nexos_window_set_title(struct gui_window *gw, const char *title)
+{
+	(void)gw;
+	(void)title;
+}
+
+static nserror nexos_window_set_url(struct gui_window *gw, struct nsurl *url)
+{
+	if (gw != NULL && gw->window != NULL && url != NULL)
+		browser_netsurf_set_url(gw->window, nsurl_access(url));
+	return NSERROR_OK;
+}
+
+static void nexos_window_set_status(struct gui_window *gw, const char *text)
+{
+	if (gw != NULL && gw->window != NULL)
+		browser_netsurf_set_status(gw->window, text);
+}
+
 static struct gui_window_table nexos_window_table = {
 	.create = nexos_window_create,
 	.destroy = nexos_window_destroy,
@@ -523,6 +612,9 @@ static struct gui_window_table nexos_window_table = {
 	.set_scroll = nexos_window_set_scroll,
 	.get_dimensions = nexos_window_dimensions,
 	.event = nexos_window_event,
+	.set_title = nexos_window_set_title,
+	.set_url = nexos_window_set_url,
+	.set_status = nexos_window_set_status,
 };
 
 static void *nexos_bitmap_create(int width, int height,
@@ -646,14 +738,61 @@ static struct gui_layout_table nexos_layout_table = {
 	.split = nexos_text_split,
 };
 
+/* NetSurf's portable engine requests these built-in stylesheets through the
+ * resource: scheme before it can convert an HTML DOM into layout boxes.  A
+ * hosted frontend normally supplies them from its resource directory; the
+ * freestanding image has no filesystem, so keep the small platform resource
+ * set in the frontend boundary. */
+static const uint8_t nexos_default_css[] =
+	"html{display:block}head{display:none}body{display:block;margin:8px;line-height:1.33}"
+	"div{display:block}p{display:block;margin:1em 0}h1{display:block;font-size:2em;font-weight:bold;margin:.67em 0}"
+	"h2{display:block;font-size:1.5em;font-weight:bold;margin:.69em 0}h3{display:block;font-size:1.17em;font-weight:bold;margin:.83em 0}"
+	"a{color:#0000ee;text-decoration:underline}strong{font-weight:bold}em{font-style:italic}"
+	"ul,ol{display:block;margin:1em 0;padding-left:40px}li{display:list-item}blockquote{display:block;margin:1em 40px}"
+	"br{display:block}img{display:inline}body{font-family:sans-serif;font-size:16px;color:#000;background:#fff}";
+
+static const uint8_t nexos_quirks_css[] =
+	"table{font-size:medium;font-style:normal;font-variant:normal;font-weight:normal}";
+
 static const char *nexos_filetype(const char *path)
 {
-	(void)path;
-	return "text/html";
+	const char *dot;
+	if (path == NULL) return "application/octet-stream";
+	dot = strrchr(path, '.');
+	if (dot != NULL && strcmp(dot, ".css") == 0) return "text/css";
+	if (dot != NULL && strcmp(dot, ".png") == 0) return "image/png";
+	if (dot != NULL && (strcmp(dot, ".html") == 0 || strcmp(dot, ".htm") == 0))
+		return "text/html";
+	return "application/octet-stream";
+}
+
+static nserror nexos_get_resource_data(const char *path,
+		const uint8_t **data, size_t *size)
+{
+	if (path == NULL || data == NULL || size == NULL) return NSERROR_BAD_PARAMETER;
+	if (strcmp(path, "default.css") == 0) {
+		*data = nexos_default_css;
+		*size = sizeof(nexos_default_css) - 1;
+		return NSERROR_OK;
+	}
+	if (strcmp(path, "quirks.css") == 0) {
+		*data = nexos_quirks_css;
+		*size = sizeof(nexos_quirks_css) - 1;
+		return NSERROR_OK;
+	}
+	return NSERROR_NOT_FOUND;
+}
+
+static nserror nexos_release_resource_data(const uint8_t *data)
+{
+	(void)data;
+	return NSERROR_OK;
 }
 
 static struct gui_fetch_table nexos_fetch_table = {
 	.filetype = nexos_filetype,
+	.get_resource_data = nexos_get_resource_data,
+	.release_resource_data = nexos_release_resource_data,
 };
 
 static struct gui_misc_table nexos_misc_table = {
@@ -705,6 +844,27 @@ nserror nexos_netsurf_open_url(const char *address,
 	error = nexos_netsurf_open(url, out);
 	nsurl_unref(url);
 	return error;
+}
+
+nserror nexos_netsurf_navigate(struct browser_window *bw, const char *address)
+{
+	struct nsurl *url = NULL;
+	nserror error;
+
+	if (bw == NULL || address == NULL) return NSERROR_BAD_PARAMETER;
+	error = nsurl_create(address, &url);
+	if (error != NSERROR_OK) return error;
+	error = browser_window_navigate(bw, url, NULL,
+		BW_NAVIGATE_HISTORY, NULL, NULL, NULL);
+	nsurl_unref(url);
+	return error;
+}
+
+void nexos_netsurf_detach_window(window_t *window)
+{
+	if (window == NULL || window != nexos_host_window) return;
+	nexos_host_window = NULL;
+	nexos_host_gui = NULL;
 }
 
 nserror nexos_netsurf_open_blank(struct browser_window **out)

@@ -5,6 +5,15 @@
 
 framebuffer_t fb = {0};
 
+static int clip_x0;
+static int clip_y0;
+static int clip_x1;
+static int clip_y1;
+
+static uint32_t *fb_target(void) {
+    return fb.draw_addr != NULL ? fb.draw_addr : fb.addr;
+}
+
 int fb_scene_dirty = 1;
 
 /* ── Catppuccin Mocha defaults ─────────────────────────────────────────── */
@@ -30,22 +39,77 @@ uint32_t col_sky      = 0x89DCEB;
 void fb_init(uint64_t addr, uint32_t w, uint32_t h,
              uint32_t pitch, uint8_t bpp) {
     fb.addr        = (uint32_t *)(uintptr_t)addr;
+    fb.draw_addr   = NULL;
     fb.width       = w;
     fb.height      = h;
     fb.pitch       = pitch;
     fb.bpp         = bpp;
     fb.initialized = 1;
+    fb_reset_clip();
+}
+
+int fb_enable_backbuffer(void) {
+    if (!fb.initialized || fb.bpp != 32 || fb.draw_addr != NULL)
+        return fb.draw_addr != NULL;
+
+    size_t bytes = (size_t)fb.pitch * (size_t)fb.height;
+    uint32_t *buffer = (uint32_t *)kmalloc(bytes);
+    if (buffer == NULL) return 0;
+    for (uint32_t y = 0; y < fb.height; y++) {
+        uint8_t *dst = (uint8_t *)buffer + (size_t)y * fb.pitch;
+        const uint8_t *src = (const uint8_t *)fb.addr + (size_t)y * fb.pitch;
+        for (uint32_t x = 0; x < fb.pitch; x++) dst[x] = src[x];
+    }
+    fb.draw_addr = buffer;
+    return 1;
+}
+
+void fb_commit(void) {
+    if (!fb.initialized || fb.draw_addr == NULL) return;
+    for (uint32_t y = 0; y < fb.height; y++) {
+        uint8_t *dst = (uint8_t *)fb.addr + (size_t)y * fb.pitch;
+        const uint8_t *src = (const uint8_t *)fb.draw_addr + (size_t)y * fb.pitch;
+        for (uint32_t x = 0; x < fb.pitch; x++) dst[x] = src[x];
+    }
+}
+
+uint32_t *fb_draw_addr(void) { return fb_target(); }
+
+void fb_set_clip(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) {
+        clip_x0 = clip_x1 = 0;
+        clip_y0 = clip_y1 = 0;
+        return;
+    }
+    int x1 = x + w;
+    int y1 = y + h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 > (int)fb.width) x1 = (int)fb.width;
+    if (y1 > (int)fb.height) y1 = (int)fb.height;
+    clip_x0 = x; clip_y0 = y; clip_x1 = x1; clip_y1 = y1;
+}
+
+void fb_reset_clip(void) {
+    clip_x0 = 0; clip_y0 = 0;
+    clip_x1 = (int)fb.width; clip_y1 = (int)fb.height;
+}
+
+int fb_clip_contains(int x, int y) {
+    return x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1;
 }
 
 void fb_put_pixel(int x, int y, uint32_t color) {
-    if ((unsigned)x >= fb.width || (unsigned)y >= fb.height) return;
-    uint32_t *row = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)y * fb.pitch);
+    if ((unsigned)x >= fb.width || (unsigned)y >= fb.height ||
+        !fb_clip_contains(x, y)) return;
+    uint32_t *row = (uint32_t *)((uint8_t *)fb_target() + (uint32_t)y * fb.pitch);
     row[x] = color;
 }
 
 uint32_t fb_get_pixel(int x, int y) {
-    if ((unsigned)x >= fb.width || (unsigned)y >= fb.height) return 0;
-    const uint32_t *row = (const uint32_t *)((uint8_t *)fb.addr + (uint32_t)y * fb.pitch);
+    if ((unsigned)x >= fb.width || (unsigned)y >= fb.height ||
+        !fb_clip_contains(x, y)) return 0;
+    const uint32_t *row = (const uint32_t *)((uint8_t *)fb_target() + (uint32_t)y * fb.pitch);
     return row[x];
 }
 
@@ -58,6 +122,10 @@ void fb_fill_rect(int x, int y, int w, int h, uint32_t c) {
     int x1 = x + w, y1 = y + h;
     if (x1 > (int)fb.width)  x1 = (int)fb.width;
     if (y1 > (int)fb.height) y1 = (int)fb.height;
+    if (x < clip_x0) x = clip_x0;
+    if (y < clip_y0) y = clip_y0;
+    if (x1 > clip_x1) x1 = clip_x1;
+    if (y1 > clip_y1) y1 = clip_y1;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x1 <= x || y1 <= y) return;
@@ -66,7 +134,7 @@ void fb_fill_rect(int x, int y, int w, int h, uint32_t c) {
     uint64_t c2 = ((uint64_t)c << 32) | c;
 
     for (int row = y; row < y1; row++) {
-        uint32_t *p = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)row * fb.pitch) + x;
+        uint32_t *p = (uint32_t *)((uint8_t *)fb_target() + (uint32_t)row * fb.pitch) + x;
         int n = x1 - x;
 
         /* Align to 8 bytes: write the first pixel separately if ptr is
@@ -183,7 +251,7 @@ void fb_clear(uint32_t color) {
  * The framebuffer is always at least 8-byte aligned at row boundaries.    */
 void fb_scroll_up(int pixels, uint32_t bg_color) {
     if (pixels <= 0 || (uint32_t)pixels >= fb.height) return;
-    uint8_t *dst = (uint8_t *)fb.addr;
+    uint8_t *dst = (uint8_t *)fb_target();
     uint8_t *src = dst + (uint32_t)pixels * fb.pitch;
     uint32_t bytes = ((uint32_t)fb.height - (uint32_t)pixels) * fb.pitch;
 
@@ -229,13 +297,17 @@ void fb_copy_rect(int sx, int sy, int dx, int dy, int w, int h) {
     if (dx + w > (int)fb.width)  w = (int)fb.width - dx;
     if (sy + h > (int)fb.height) h = (int)fb.height - sy;
     if (dy + h > (int)fb.height) h = (int)fb.height - dy;
+    if (dx < clip_x0) { int n = clip_x0 - dx; sx += n; dx += n; w -= n; }
+    if (dy < clip_y0) { int n = clip_y0 - dy; sy += n; dy += n; h -= n; }
+    if (dx + w > clip_x1) w = clip_x1 - dx;
+    if (dy + h > clip_y1) h = clip_y1 - dy;
     if (w <= 0 || h <= 0) return;
 
     for (int row = 0; row < h; row++) {
         int srow = sy + row, drow = dy + row;
-        uint32_t *s = (uint32_t *)((uint8_t *)fb.addr +
+        uint32_t *s = (uint32_t *)((uint8_t *)fb_target() +
                                    (uint32_t)srow * fb.pitch) + sx;
-        uint32_t *d = (uint32_t *)((uint8_t *)fb.addr +
+        uint32_t *d = (uint32_t *)((uint8_t *)fb_target() +
                                    (uint32_t)drow * fb.pitch) + dx;
         for (int col = 0; col < w; col++) d[col] = s[col];
     }
@@ -251,6 +323,10 @@ void fb_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alph
     int x1 = x + w, y1 = y + h;
     if (x1 > (int)fb.width)  x1 = (int)fb.width;
     if (y1 > (int)fb.height) y1 = (int)fb.height;
+    if (x < clip_x0) x = clip_x0;
+    if (y < clip_y0) y = clip_y0;
+    if (x1 > clip_x1) x1 = clip_x1;
+    if (y1 > clip_y1) y1 = clip_y1;
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x1 <= x || y1 <= y) return;
@@ -262,7 +338,7 @@ void fb_fill_rect_blend(int x, int y, int w, int h, uint32_t color, uint8_t alph
     uint32_t inv     = (uint32_t)(255u - alpha);
 
     for (int row = y; row < y1; row++) {
-        uint32_t *p = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)row * fb.pitch) + x;
+        uint32_t *p = (uint32_t *)((uint8_t *)fb_target() + (uint32_t)row * fb.pitch) + x;
         for (int col = x; col < x1; col++, p++) {
             uint32_t bg = *p;
             uint8_t r = (uint8_t)((fg_r + ((bg >> 16) & 0xFFu) * inv) >> 8);
@@ -295,6 +371,10 @@ void fb_blur_rect(int x, int y, int w, int h, int radius) {
     if (y1 > (int)fb.height) y1 = (int)fb.height;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
+    if (x0 < clip_x0) x0 = clip_x0;
+    if (y0 < clip_y0) y0 = clip_y0;
+    if (x1 > clip_x1) x1 = clip_x1;
+    if (y1 > clip_y1) y1 = clip_y1;
     int rw = x1 - x0, rh = y1 - y0;
     if (rw <= 0 || rh <= 0) return;
 
@@ -304,13 +384,13 @@ void fb_blur_rect(int x, int y, int w, int h, int radius) {
         /* Fallback: original step-sampled single-pass (always succeeds) */
         int step = 3;
         for (int py = y0; py < y1; py++) {
-            uint32_t *row = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)py * fb.pitch);
+            uint32_t *row = (uint32_t *)((uint8_t *)fb_target() + (uint32_t)py * fb.pitch);
             for (int px = x0; px < x1; px++) {
                 uint32_t sr = 0, sg = 0, sb = 0; int n = 0;
                 for (int dy = -radius; dy <= radius; dy += step) {
                     int sy = py + dy;
                     if (sy < y0 || sy >= y1) continue;
-                    uint32_t *srow = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)sy * fb.pitch);
+                    uint32_t *srow = (uint32_t *)((uint8_t *)fb_target() + (uint32_t)sy * fb.pitch);
                     for (int dx = -radius; dx <= radius; dx += step) {
                         int sx2 = px + dx;
                         if (sx2 < x0 || sx2 >= x1) continue;
@@ -329,7 +409,7 @@ void fb_blur_rect(int x, int y, int w, int h, int radius) {
     /* ── Pass 1: horizontal sliding-window blur → scratch ──────────────── */
     for (int py = y0; py < y1; py++) {
         const uint32_t *src = (const uint32_t *)
-            ((uint8_t *)fb.addr + (uint32_t)py * fb.pitch);
+            ((uint8_t *)fb_target() + (uint32_t)py * fb.pitch);
         uint32_t *dst = scratch + (py - y0) * rw;
 
         /* Prime the sliding window for column 0 */
@@ -387,7 +467,7 @@ void fb_blur_rect(int x, int y, int w, int h, int radius) {
             sb +=  c        & 0xFFu;
         }
         {
-            uint32_t *drow = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)y0 * fb.pitch);
+            uint32_t *drow = (uint32_t *)((uint8_t *)fb_target() + (uint32_t)y0 * fb.pitch);
             drow[px] = ((sr / (uint32_t)diam) << 16) |
                        ((sg / (uint32_t)diam) <<  8) |
                         (sb / (uint32_t)diam);
@@ -411,7 +491,7 @@ void fb_blur_rect(int x, int y, int w, int h, int radius) {
             sg += (add_c >>  8) & 0xFFu;
             sb +=  add_c        & 0xFFu;
 
-            uint32_t *drow = (uint32_t *)((uint8_t *)fb.addr +
+            uint32_t *drow = (uint32_t *)((uint8_t *)fb_target() +
                              (uint32_t)(y0 + py) * fb.pitch);
             drow[px] = ((sr / (uint32_t)diam) << 16) |
                        ((sg / (uint32_t)diam) <<  8) |

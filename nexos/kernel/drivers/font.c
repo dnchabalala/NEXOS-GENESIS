@@ -171,13 +171,13 @@ void font_putchar(int x, int y, char c, uint32_t fg, uint32_t bg) {
         if (py >= (int)fb.height) break;
 
         /* Compute row pointer once — avoids recomputing the multiply 8 times */
-        uint32_t *rowptr = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)py * fb.pitch);
+        uint32_t *rowptr = (uint32_t *)((uint8_t *)fb_draw_addr() + (uint32_t)py * fb.pitch);
         uint8_t bits = glyph[row];
 
         /* Unrolled over 8 columns — compiler can further optimise */
         for (int col = 0; col < 8; col++) {
             int px = x + col;
-            if (px < 0 || px >= fbw) continue;
+            if (px < 0 || px >= fbw || !fb_clip_contains(px, py)) continue;
             if (bits & (0x80u >> col)) {
                 rowptr[px] = fg;
             } else if (!transparent_bg) {
@@ -213,17 +213,21 @@ void font_putchar2x(int x, int y, char c, uint32_t fg, uint32_t bg) {
             int py = y + row * 2 + sr;
             if (py < 0) continue;
             if (py >= fbh) goto done2x;
-            uint32_t *rowptr = (uint32_t *)((uint8_t *)fb.addr + (uint32_t)py * fb.pitch);
+            uint32_t *rowptr = (uint32_t *)((uint8_t *)fb_draw_addr() + (uint32_t)py * fb.pitch);
             for (int col = 0; col < 8; col++) {
                 int px0 = x + col * 2;
                 if (px0 + 1 < 0) continue;
                 if (px0 >= fbw)  break;
                 if (bits & (0x80u >> col)) {
-                    if (px0 >= 0)    rowptr[px0]   = fg;
-                    if (px0+1 < fbw) rowptr[px0+1] = fg;
+                    if (px0 >= 0 && fb_clip_contains(px0, py))
+                        rowptr[px0] = fg;
+                    if (px0+1 < fbw && fb_clip_contains(px0 + 1, py))
+                        rowptr[px0+1] = fg;
                 } else if (!transparent_bg) {
-                    if (px0 >= 0)    rowptr[px0]   = bg;
-                    if (px0+1 < fbw) rowptr[px0+1] = bg;
+                    if (px0 >= 0 && fb_clip_contains(px0, py))
+                        rowptr[px0] = bg;
+                    if (px0+1 < fbw && fb_clip_contains(px0 + 1, py))
+                        rowptr[px0+1] = bg;
                 }
             }
         }

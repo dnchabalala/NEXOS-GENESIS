@@ -42,17 +42,19 @@ CFLAGS = -std=c11 -ffreestanding -fno-stack-protector -fno-pic \
         -DMBEDTLS_CONFIG_FILE=\"$(TLS_CONFIG_FILE)\" \
         -Wno-unused-parameter -Wno-unused-variable
 
+NETSURF_CFLAGS = -Iports/netsurf/src -Iports/netsurf/src/netsurf \
+	-Iports/netsurf/src/netsurf/include -Iports/netsurf/src/libwapcaplet/include \
+	-Iports/netsurf/src/libparserutils/include -Iports/netsurf/src/libhubbub/include \
+	-Iports/netsurf/src/libnsutils/include -Iports/netsurf/src/libcss/include \
+	-Iports/netsurf/src/libdom/include -Iports/netsurf/src/libnsfb/include
+CFLAGS += $(NETSURF_CFLAGS)
+
 ifneq ($(NATIVE_TLS_TEST),)
 CFLAGS += -DNEXOS_NATIVE_TLS_TEST
 endif
 
 ifneq ($(NATIVE_NETSURF_TEST),)
-CFLAGS += -DNEXOS_NATIVE_NETSURF_TEST \
-	-Iports/netsurf/src -Iports/netsurf/src/netsurf \
-	-Iports/netsurf/src/netsurf/include -Iports/netsurf/src/libwapcaplet/include \
-	-Iports/netsurf/src/libparserutils/include -Iports/netsurf/src/libhubbub/include \
-	-Iports/netsurf/src/libnsutils/include -Iports/netsurf/src/libcss/include \
-	-Iports/netsurf/src/libdom/include -Iports/netsurf/src/libnsfb/include
+CFLAGS += -DNEXOS_NATIVE_NETSURF_TEST
 endif
 
 ASFLAGS = -f elf64
@@ -144,15 +146,28 @@ KERNEL_ASM_SOURCES = \
 KERNEL_C_OBJS   = $(patsubst %.c,   $(BUILD)/%.o,     $(KERNEL_C_SOURCES))
 KERNEL_ASM_OBJS = $(patsubst %.asm, $(BUILD)/%.asm.o, $(KERNEL_ASM_SOURCES))
 ALL_OBJS        = $(KERNEL_ASM_OBJS) $(KERNEL_C_OBJS)
+KERNEL_DEPS     = $(KERNEL_C_OBJS:.o=.d)
+NETSURF_NATIVE_ARCHIVES = \
+	build/netsurf-native/libnetsurf-native.a \
+	build/netsurf-native/libnetsurf-native-frontend.a \
+	build/netsurf-native/libwapcaplet-native.a \
+	build/netsurf-native/libparserutils-native.a \
+	build/netsurf-native/libhubbub-native.a \
+	build/netsurf-native/libnsutils-native.a \
+	build/netsurf-native/libcss-native.a \
+	build/netsurf-native/libdom-native.a \
+	build/netsurf-native/libnsfb-native.a
 
 # ---- Targets ----
 DISK_IMG = $(BUILD)/nexos_disk.img
 
-.PHONY: all kernel iso clean run run-debug run-with-disk disk \
+.PHONY: all kernel iso clean run run-browser run-browser-interactive run-debug run-with-disk disk \
         install install-usb run-vbox run-vmware run-installer check
 
 .PHONY: netsurf-sources netsurf-config netsurf-deps netsurf-adapter-check netsurf-native-objects netsurf-native-deps netsurf-native-frontend netsurf-native-link-probe netsurf-native-kernel-link tls-source tls-check tls-host-test \
 		tls-freestanding native-tls test-tcp netsurf-native-kernel-test netsurf-native-run netsurf-native-gui-object
+
+-include $(KERNEL_DEPS)
 
 netsurf-sources:
 	@chmod +x $(TOOLS)/netsurf_fetch_sources.sh
@@ -215,21 +230,13 @@ netsurf-native-link-probe: netsurf-native-objects netsurf-native-frontend
 netsurf-native-kernel-link: netsurf-native-link-probe netsurf-native-gui-object $(ALL_OBJS) $(TLS_LIBS)
 	@echo "[LD] build/nexos.kernel.netsurf"
 	$(LD) $(LDFLAGS) -o build/nexos.kernel.netsurf $(ALL_OBJS) $(TLS_LIBS) \
-		--whole-archive build/netsurf-native/libnetsurf-native.a \
-		build/netsurf-native/libnetsurf-native-frontend.a \
-		build/netsurf-native/libwapcaplet-native.a \
-		build/netsurf-native/libparserutils-native.a \
-		build/netsurf-native/libhubbub-native.a \
-		build/netsurf-native/libnsutils-native.a \
-		build/netsurf-native/libcss-native.a \
-		build/netsurf-native/libdom-native.a \
-		build/netsurf-native/libnsfb-native.a \
+		--whole-archive $(NETSURF_NATIVE_ARCHIVES) \
 		--no-whole-archive $(LIBGCC)
 
 netsurf-native-gui-object:
 	@mkdir -p build/kernel/gui
 	@echo "[CC] kernel/gui/gui.c (native NetSurf target)"
-	$(CC) $(CFLAGS) -c kernel/gui/gui.c -o build/kernel/gui/gui.o
+	$(CC) $(CFLAGS) -MMD -MP -MF build/kernel/gui/gui.d -c kernel/gui/gui.c -o build/kernel/gui/gui.o
 
 netsurf-native-kernel-test:
 	@$(MAKE) NATIVE_NETSURF_TEST=1 netsurf-native-kernel-link
@@ -282,6 +289,15 @@ iso: kernel
 run: iso
 	@chmod +x $(TOOLS)/run_qemu.sh
 	@$(TOOLS)/run_qemu.sh
+
+run-browser: iso
+	@chmod +x $(TOOLS)/run_browser_qemu.sh
+	@$(TOOLS)/run_browser_qemu.sh
+
+run-browser-interactive: iso
+	@chmod +x $(TOOLS)/run_browser_qemu.sh
+	@echo "[QEMU] Interactive Browser: use the graphical QEMU window; close it to stop"
+	@DISPLAY_MODE=sdl $(TOOLS)/run_browser_qemu.sh
 
 run-debug: iso
 	@chmod +x $(TOOLS)/run_qemu_debug.sh
@@ -342,10 +358,11 @@ clean:
 	rm -rf $(BUILD)
 
 # ---- Link ----
-$(KERNEL_ELF): $(ALL_OBJS) $(BOOT)/linker.ld $(TLS_LIBS)
+$(KERNEL_ELF): netsurf-native-link-probe $(ALL_OBJS) $(BOOT)/linker.ld $(TLS_LIBS)
 	@mkdir -p $(dir $@)
 	@echo "[LD] $@"
-	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS) $(TLS_LIBS) $(LIBGCC)
+	$(LD) $(LDFLAGS) -o $@ $(ALL_OBJS) $(TLS_LIBS) \
+		--whole-archive $(NETSURF_NATIVE_ARCHIVES) --no-whole-archive $(LIBGCC)
 
 $(TLS_LIBS): tls-freestanding
 
@@ -353,7 +370,7 @@ $(TLS_LIBS): tls-freestanding
 $(BUILD)/%.o: %.c
 	@mkdir -p $(dir $@)
 	@echo "[CC] $<"
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -MF $(patsubst %.o,%.d,$@) -c $< -o $@
 
 $(BUILD)/kernel/libc_float.o: CFLAGS += -msse -msse2 -mfpmath=sse
 

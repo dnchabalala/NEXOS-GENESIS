@@ -10,3 +10,4 @@ void taskbar_handle_click(int x, int y);
 void taskbar_handle_mouse(int mx, int my);
 void taskbar_update(void);
 int  taskbar_get_y(void);
+void taskbar_get_apps_rect(int *x, int *y, int *w, int *h);

@@ -3,9 +3,9 @@
 #include "wm.h"
 #include <stdint.h>
 
+struct browser_window;
+
 #define BROWSER_URL_MAX   512
-#define BROWSER_BUF_MAX   (24 * 1024)
-#define BROWSER_HTML_MAX  (64 * 1024)
 
 typedef enum {
     BSTATE_IDLE,
@@ -18,14 +18,12 @@ typedef struct {
     window_t        *win;
     char             url[BROWSER_URL_MAX];
     int              url_len;
-    char             text[BROWSER_BUF_MAX];
-    int              text_len;
-    char             html[BROWSER_HTML_MAX];
-    int              html_len;
-    int              scroll;
-    int              line_count;
     browser_state_t  state;
     char             status[80];
+    struct browser_window *netsurf;
+    uint8_t          address_focus;
 } browser_app_t;
 
 browser_app_t *browser_create(int x, int y);
+void browser_netsurf_set_status(window_t *win, const char *status);
+void browser_netsurf_set_url(window_t *win, const char *url);

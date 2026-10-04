@@ -177,37 +177,38 @@ while those symbols intentionally belong to the freestanding NexOS kernel.
 Adding host shims would conceal the real runtime boundary and duplicate the
 transport, so the port must link NetSurf as part of the NexOS image instead.
 
-## Current NexOS UI boundary
+## Apps -> Browser integration
 
-The existing Apps -> Browser entry is not NetSurf. `kernel/gui/launcher.c`
-registers `launch_browser`, which is defined in `kernel/gui/gui.c` and calls
-`browser_create()` in `kernel/gui/browser_app.c`. That application has its own
-address bar, HTTP fetch call, bounded HTML tag stripper, and framebuffer
-renderer. Its `browser_fetch_depth()` scheme check rejects every URL that does
-not begin with `http://`, so `https://example.com` displays
-`Error: URL must start with http://` before calling `http_get()`.
+`kernel/gui/launcher.c` still registers the existing `launch_browser()`
+entry, but `kernel/gui/browser_app.c` is now a NetSurf-backed shell rather
+than a second web engine. The retained NexOS UI owns the window lifecycle,
+title bar, toolbar, address bar, status indicator, and focus handling.
 
-The kernel `http_get()` implementation itself already handles HTTPS through
-the native TLS path; the visible legacy application does not reach it for an
-HTTPS URL. Normal boot also does not initialize NetSurf. The native TLS probe
-is compiled and run only by `make native-tls`, while normal boot messages are
-network/GUI initialization. Apps -> Browser will remain on this existing shell
-until a real native NetSurf frontend and engine link are available.
+The page path is:
 
-`netsurf-native-deps` now cross-builds the required locked portable archives
-with freestanding NexOS flags. `netsurf-native-link-probe` combines those
-archives with `libnetsurf-native.a` using `ld -r`, and
-`netsurf-native-kernel-link` produces the separate
-`build/nexos.kernel.netsurf` image with the engine and frontend linked into
-the real kernel. The native frontend currently registers the mandatory
-operation tables, creates a NexOS WM-backed browser surface, initializes the
-real NetSurf engine, and runs a NexOS timer pump. A controlled QEMU probe has
-confirmed `NETSURF INIT PASS`, `NETSURF CONTEXT PASS`, and
-`NETSURF SURFACE PASS` without changing Apps -> Browser.
+```text
+Apps -> Browser chrome -> browser_window -> NexOS fetcher -> http_get()
+       -> DNS/TCP/Mbed TLS -> NetSurf HTML/DOM/CSS/layout -> plotters
+       -> Browser content viewport -> NexOS framebuffer
+```
 
-The remaining runtime boundary is navigation/fetch scheduling: the first
-deferred HTTPS request reaches the existing `http_get()` path but its DNS
-poll timed out from the browser-triggered call. Plotter/bitmap redraw and
-HTML/CSS/layout completion are not yet claimed. The ordinary Apps -> Browser
-entry therefore remains the legacy viewer until those native NetSurf stages
-are proven.
+The old HTTP-only URL check, HTML stripper, document buffer, and custom page
+renderer are no longer used. Address-bar hostnames are normalized to HTTPS,
+and explicit `http://` and `https://` URLs are passed to NetSurf navigation.
+Back, forward, reload, content clicks, and basic keyboard/page navigation use
+the upstream browser-window APIs. NetSurf plotting is translated into the
+Browser content origin and clipped so page output cannot paint over the
+toolbar or status bar.
+
+`netsurf-native-deps` cross-builds the locked portable archives with
+freestanding NexOS flags. The normal `kernel` target now links those archives
+and `libnetsurf-native.a` into the actual kernel. `make run-browser` launches
+the same ISO with KVM, host CPU feature exposure, RTL8139 user networking,
+and the runtime conditions required for RDRAND-backed entropy and SLIRP DNS.
+The generic `make run` target remains unchanged for emulated-CPU boot tests.
+
+The Apps -> Browser flow was validated in QEMU by opening the Apps launcher,
+selecting Browser, entering `https://example.com/`, and then navigating to
+`https://nexos.dnchabalala.site/`. The latter reached DNS, TCP, verified
+TLS 1.3, HTML/CSS subresource fetching, NetSurf layout, and nonzero text and
+rectangle plotter activity inside the Browser viewport.

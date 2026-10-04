@@ -16,11 +16,13 @@ static int      con_x  = 0;
 static int      con_y  = 0;
 static uint32_t con_fg = 0xCDD6F4; /* COL_TEXT */
 static uint32_t con_bg = 0x1E1E2E; /* COL_BASE */
+static int      con_display_enabled = 1;
 
 void console_init(void) {
     con_x = 0; con_y = 0;
     con_fg = 0xCDD6F4;
     con_bg = 0x1E1E2E;
+    con_display_enabled = 1;
 }
 
 static void con_newline(void) {
@@ -33,7 +35,7 @@ static void con_newline(void) {
 }
 
 void console_putchar(char c) {
-    if (!fb.initialized) return;
+    if (!fb.initialized || !con_display_enabled) return;
     switch (c) {
     case '\n':
         con_newline();
@@ -76,9 +78,17 @@ void console_set_color(uint32_t fg, uint32_t bg) {
 }
 
 void console_clear(void) {
-    if (!fb.initialized) return;
+    if (!fb.initialized || !con_display_enabled) return;
     fb_clear(con_bg);
     con_x = 0; con_y = 0;
+}
+
+void console_set_display_enabled(int enabled) {
+    con_display_enabled = enabled ? 1 : 0;
+}
+
+int console_display_enabled(void) {
+    return con_display_enabled;
 }
 
 void console_set_pos(int x, int y) {
