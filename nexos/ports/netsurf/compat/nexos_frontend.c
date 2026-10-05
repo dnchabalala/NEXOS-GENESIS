@@ -70,6 +70,20 @@ static int nexos_host_y;
 static int nexos_host_width;
 static int nexos_host_height;
 static struct gui_window *nexos_host_gui;
+static uint64_t nexos_nav_start;
+static int nexos_nav_active;
+static int nexos_nav_invalidated;
+static int nexos_nav_painted;
+static unsigned long nexos_sched_scheduled;
+static unsigned long nexos_sched_executed;
+static uint64_t nexos_sched_max_lateness;
+
+static void nexos_nav_trace(const char *stage)
+{
+	if (!nexos_nav_active) return;
+	klog(LOG_INFO, "T+%llu %s",
+		(unsigned long long)(timer_get_ticks() - nexos_nav_start), stage);
+}
 
 void nexos_netsurf_bind_window(window_t *window, int x, int y,
 		int width, int height)
@@ -94,16 +108,26 @@ void nexos_netsurf_set_viewport(window_t *window, int x, int y,
 		nexos_host_gui->origin_y = y;
 		nexos_host_gui->width = width;
 		nexos_host_gui->height = height;
-		browser_window_set_dimensions(nexos_host_gui->bw, width, height);
+		/* set_dimensions is only valid for core-managed windows. */
+		browser_window_reformat(nexos_host_gui->bw, false, width, height);
 	}
 }
 
 bool nexos_netsurf_scroll(window_t *window, int dx, int dy)
 {
+	static int scroll_diag_budget = 16;
+	bool handled;
 	if (window == NULL || window != nexos_host_window ||
 	    nexos_host_gui == NULL || nexos_host_gui->bw == NULL)
 		return false;
-	return browser_window_scroll_at_point(nexos_host_gui->bw, 1, 1, dx, dy);
+	handled = browser_window_scroll_at_point(nexos_host_gui->bw, 1, 1, dx, dy);
+	if (scroll_diag_budget > 0) {
+		klog(LOG_DEBUG, "NETSURF SCROLL dx=%d dy=%d handled=%d actual=(%d,%d)",
+			dx, dy, handled ? 1 : 0, nexos_host_gui->scroll_x,
+			nexos_host_gui->scroll_y);
+		scroll_diag_budget--;
+	}
+	return handled;
 }
 
 void nexos_netsurf_mouse_track(window_t *window, int x, int y)
@@ -321,16 +345,42 @@ void nexos_netsurf_paint(window_t *window)
 	ctx.background_images = true;
 	ctx.plot = &nexos_plotters;
 	ctx.priv = &rd;
-	klog(LOG_INFO, "NETSURF FRAMEBUFFER PAINT width=%d height=%d",
-		(int64_t)clip.x1, (int64_t)clip.y1);
+	if (!nexos_nav_painted) {
+		nexos_nav_painted = 1;
+		nexos_nav_trace("FIRST VISIBLE PAINT");
+		klog(LOG_INFO, "T+%llu SCHEDULER scheduled=%u executed=%u max_lateness=%llu",
+			(unsigned long long)(timer_get_ticks() - nexos_nav_start),
+			(unsigned int)nexos_sched_scheduled,
+			(unsigned int)nexos_sched_executed,
+			(unsigned long long)nexos_sched_max_lateness);
+	}
+	static int paint_diag_budget = 2;
+	if (paint_diag_budget > 0) {
+		klog(LOG_INFO, "NETSURF FRAMEBUFFER PAINT width=%d height=%d",
+			(int64_t)clip.x1, (int64_t)clip.y1);
+		paint_diag_budget--;
+	}
+	static int redraw_start_budget = 8;
+	if (redraw_start_budget > 0) {
+		nexos_nav_trace("NETSURF REDRAW START");
+		redraw_start_budget--;
+	}
 	if (browser_window_redraw(gw->bw, gw->scroll_x, gw->scroll_y,
 			&clip, &ctx)) {
-		klog(LOG_INFO, "NETSURF PLOT PASS rect=%u text=%u bitmap=%u pixel=%x",
-			(unsigned int)nexos_plot_rects,
-			(unsigned int)nexos_plot_texts,
-			(unsigned int)nexos_plot_bitmaps,
-			(unsigned int)fb_get_pixel(window->x + 12,
-				window->y + WM_TITLEBAR_H + 12));
+		static int redraw_diag_budget = 8;
+		if (redraw_diag_budget > 0) {
+			nexos_nav_trace("NETSURF REDRAW COMPLETE");
+			redraw_diag_budget--;
+		}
+		if (paint_diag_budget > 0) {
+			klog(LOG_INFO, "NETSURF PLOT PASS rect=%u text=%u bitmap=%u pixel=%x",
+				(unsigned int)nexos_plot_rects,
+				(unsigned int)nexos_plot_texts,
+				(unsigned int)nexos_plot_bitmaps,
+				(unsigned int)fb_get_pixel(window->x + 12,
+					window->y + WM_TITLEBAR_H + 12));
+			paint_diag_budget--;
+		}
 	}
 }
 
@@ -439,6 +489,7 @@ static nserror nexos_schedule(int timeout, void (*callback)(void *), void *pw)
 	int i;
 
 	if (callback == NULL) return NSERROR_BAD_PARAMETER;
+	if (nexos_nav_active) nexos_sched_scheduled++;
 
 	/* NetSurf permits several independent scheduled callbacks.  Reschedule
 	 * only the matching callback/context pair; unrelated callbacks must not
@@ -483,6 +534,12 @@ void nexos_netsurf_pump(void)
 			continue;
 		callback = nexos_timers[i].callback;
 		pw = nexos_timers[i].pw;
+		if (nexos_nav_active) {
+			uint64_t lateness = now - nexos_timers[i].due;
+			nexos_sched_executed++;
+			if (lateness > nexos_sched_max_lateness)
+				nexos_sched_max_lateness = lateness;
+		}
 		nexos_timers[i].active = false;
 		if (callback != NULL) callback(pw);
 	}
@@ -546,6 +603,10 @@ static nserror nexos_window_invalidate(struct gui_window *gw,
 		const struct rect *rect)
 {
 	(void)rect;
+	if (!nexos_nav_invalidated) {
+		nexos_nav_invalidated = 1;
+		nexos_nav_trace("FIRST PAINT REQUEST");
+	}
 	if (gw != NULL && gw->window != NULL) wm_invalidate(gw->window);
 	return NSERROR_OK;
 }
@@ -564,6 +625,7 @@ static nserror nexos_window_set_scroll(struct gui_window *gw,
 	if (gw == NULL || rect == NULL) return NSERROR_BAD_PARAMETER;
 	gw->scroll_x = rect->x0;
 	gw->scroll_y = rect->y0;
+	if (gw->window != NULL) wm_invalidate(gw->window);
 	return NSERROR_OK;
 }
 
@@ -852,10 +914,25 @@ nserror nexos_netsurf_navigate(struct browser_window *bw, const char *address)
 	nserror error;
 
 	if (bw == NULL || address == NULL) return NSERROR_BAD_PARAMETER;
+	nexos_nav_start = timer_get_ticks();
+	nexos_nav_active = 1;
+	nexos_nav_invalidated = 0;
+	nexos_nav_painted = 0;
+	nexos_sched_scheduled = 0;
+	nexos_sched_executed = 0;
+	nexos_sched_max_lateness = 0;
+	klog(LOG_INFO, "T+0 NETSURF NAV START url=%s", address);
+	klog(LOG_INFO, "NETSURF NAV START url=%s", address);
 	error = nsurl_create(address, &url);
-	if (error != NSERROR_OK) return error;
+	if (error != NSERROR_OK) {
+		klog(LOG_WARN, "NETSURF NAV URL ERROR=%d url=%s", (int)error, address);
+		return error;
+	}
 	error = browser_window_navigate(bw, url, NULL,
 		BW_NAVIGATE_HISTORY, NULL, NULL, NULL);
+	klog(error == NSERROR_OK ? LOG_INFO : LOG_WARN,
+		"NETSURF NAV %s error=%d url=%s",
+		error == NSERROR_OK ? "QUEUED" : "FAILED", (int)error, address);
 	nsurl_unref(url);
 	return error;
 }

@@ -3,16 +3,16 @@
  * MIT License */
 #include "notif.h"
 #include "anim.h"
+#include "aurora.h"
 #include "../drivers/fb.h"
 #include "../drivers/font.h"
 #include <stdint.h>
 
-#define NOTIF_W    280
-#define NOTIF_H     60
-#define NOTIF_PAD   10
-#define NOTIF_GAP    6
+#define NOTIF_W    320
+#define NOTIF_H     72
+#define NOTIF_PAD   15
+#define NOTIF_GAP   10
 
-#define SLIDE_MS   280   /* slide-in duration  (ms) */
 #define FADE_MS    600   /* fade-out window at end of life (ms) */
 
 typedef struct {
@@ -41,8 +41,11 @@ void notif_show(const char *title, const char *body, uint32_t ms) {
             nstr_cpy(notifs[i].body,  body,  80);
             notifs[i].ms_left  = ms;
             notifs[i].ms_total = ms;
-            notifs[i].slide_in = 0;
+            /* The compositor is event-driven; show the toast in its parked
+             * position rather than forcing a full-scene animation loop. */
+            notifs[i].slide_in = 256;
             notifs[i].active   = 1;
+            fb_scene_dirty = 1;
             return;
         }
     }
@@ -53,22 +56,20 @@ void notif_show(const char *title, const char *body, uint32_t ms) {
     nstr_cpy(notifs[last].body,  body,  80);
     notifs[last].ms_left  = ms;
     notifs[last].ms_total = ms;
-    notifs[last].slide_in = 0;
+    notifs[last].slide_in = 256;
     notifs[last].active   = 1;
+    fb_scene_dirty = 1;
 }
 
 void notif_tick(uint32_t delta_ms) {
     for (int i = 0; i < NOTIF_MAX; i++) {
         if (!notifs[i].active) continue;
 
-        /* advance slide-in */
-        if (notifs[i].slide_in < 256) {
-            int step = (int)(delta_ms * 256 / SLIDE_MS);
-            notifs[i].slide_in = anim_clamp(notifs[i].slide_in + step, 0, 256);
-        }
-
         /* age out */
-        if (notifs[i].ms_left <= delta_ms) notifs[i].active = 0;
+        if (notifs[i].ms_left <= delta_ms) {
+            notifs[i].active = 0;
+            fb_scene_dirty = 1;
+        }
         else notifs[i].ms_left -= delta_ms;
     }
 }
@@ -81,8 +82,9 @@ void notif_draw(void) {
         if (!notifs[i].active) continue;
 
         /* ── Position ── */
-        int nx_rest = (int)fb.width - NOTIF_W - 12;
-        int ny      = (int)fb.height - 40 - (count + 1) * (NOTIF_H + NOTIF_GAP);
+        int nx_rest = (int)fb.width - NOTIF_W - 24;
+        int ny      = (int)fb.height - 24 - 66 -
+                      (count + 1) * (NOTIF_H + NOTIF_GAP);
 
         /* Ease-out-cubic slide: notification decelerates into resting position */
         int eased = anim_ease_out_cubic(notifs[i].slide_in);
@@ -99,18 +101,17 @@ void notif_draw(void) {
 
         if (bg_alpha < 4) { count++; continue; }
 
-        /* ── Drop shadow ── */
+        /* ── Aurora toast surface ── */
         fb_fill_rect_blend(nx + 4, ny + 4, NOTIF_W, NOTIF_H,
-                           0x000000, (uint8_t)(bg_alpha / 3));
-
-        /* ── Card background ── */
-        fb_fill_rect_blend(nx, ny, NOTIF_W, NOTIF_H, 0x1E1E2E, bg_alpha);
-
-        /* ── Top rim specular ── */
-        fb_fill_rect_blend(nx + 12, ny, NOTIF_W - 24, 1, 0x6C6F85, rim_alpha);
+                           aurora_color(AURORA_COLOR_BACKGROUND),
+                           (uint8_t)(bg_alpha / 3));
+        aurora_panel((aurora_rect_t){nx, ny, NOTIF_W, NOTIF_H}, 1);
+        fb_fill_rect_blend(nx + 12, ny, NOTIF_W - 24, 1,
+                           aurora_color(AURORA_COLOR_BORDER_FOCUSED), rim_alpha);
 
         /* ── Left accent bar ── */
-        fb_fill_rect_blend(nx, ny + 6, 3, NOTIF_H - 12, COL_BLUE, acc_alpha);
+        fb_fill_rect_blend(nx, ny + 6, 3, NOTIF_H - 12,
+                           aurora_color(AURORA_COLOR_ACCENT), acc_alpha);
 
         /* ── Progress underline — shows remaining life ── */
         if (notifs[i].ms_total > 0) {
@@ -118,17 +119,22 @@ void notif_draw(void) {
                               notifs[i].ms_total);
             if (bar_w > 0)
                 fb_fill_rect_blend(nx, ny + NOTIF_H - 2, bar_w, 2,
-                                   COL_BLUE, (uint8_t)(120 * fade / 256));
+                                   aurora_color(AURORA_COLOR_ACCENT),
+                                   (uint8_t)(120 * fade / 256));
         }
 
         /* ── Text (fades toward background colour as notification expires) ── */
         if (fade > 12) {
-            uint32_t c_title = anim_color_lerp(0x1E1E2E, COL_BLUE, fade);
-            uint32_t c_body  = anim_color_lerp(0x1E1E2E, COL_TEXT, fade);
-            font_puts(nx + NOTIF_PAD + 5, ny + 10, notifs[i].title,
-                      c_title, 0x1E1E2E);
-            font_puts(nx + NOTIF_PAD + 5, ny + 30, notifs[i].body,
-                      c_body,  0x1E1E2E);
+            uint32_t c_title = anim_color_lerp(
+                aurora_color(AURORA_COLOR_ELEVATED),
+                aurora_color(AURORA_COLOR_ACCENT), fade);
+            uint32_t c_body  = anim_color_lerp(
+                aurora_color(AURORA_COLOR_ELEVATED),
+                aurora_color(AURORA_COLOR_TEXT_PRIMARY), fade);
+            font_aurora_puts(nx + NOTIF_PAD + 5, ny + 10, notifs[i].title,
+                             14, c_title, aurora_color(AURORA_COLOR_ELEVATED));
+            font_aurora_puts(nx + NOTIF_PAD + 5, ny + 32, notifs[i].body,
+                             12, c_body, aurora_color(AURORA_COLOR_ELEVATED));
         }
 
         count++;

@@ -3,11 +3,11 @@
 #include <stdint.h>
 
 #define WM_MAX_WINDOWS  16
-#define WM_TITLEBAR_H   32
+#define WM_TITLEBAR_H   54
 #define WM_BORDER       1
 #define WM_SHADOW_OFF   4
 #define WM_SHADOW_COL   0x0A0A14
-#define WM_BTN_R        7
+#define WM_BTN_R        6
 #define WM_BTN_GAP      22
 
 typedef enum { WIN_NORMAL, WIN_MINIMIZED, WIN_MAXIMIZED } win_state_t;

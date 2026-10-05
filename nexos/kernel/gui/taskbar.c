@@ -1,231 +1,182 @@
-/* NexOS — kernel/gui/taskbar.c
- * Bottom taskbar with smooth hover-glow animations on all interactive elements.
- * MIT License */
+/* NexOS — kernel/gui/taskbar.c | Aurora floating dock | MIT License */
 #include "taskbar.h"
-#include "anim.h"
+#include "aurora.h"
 #include "wm.h"
 #include "launcher.h"
 #include "../drivers/fb.h"
-#include "../drivers/font.h"
-#include "../drivers/rtc.h"
-#include "../drivers/wifi.h"
-#include "../net/netif.h"
-#include "../mm/pmm.h"
 #include "../kernel.h"
-#include <stdint.h>
 
-#define TB_BTN_W  80    /* "Apps" button width */
-#define TB_WIN_W  120   /* window pill width */
-#define TB_WIN_STEP 128 /* stride between window pills */
-#define TB_APPS_X    8
-#define TB_APPS_H    28
-#define TB_APPS_YOFF 6
+void launch_filemanager(void);
+void launch_terminal(void);
+void launch_browser(void);
+void launch_sysmon(void);
+void launch_settings(void);
 
-static int tb_y;
+#define DOCK_H       66
+#define DOCK_PAD_X   16
+#define DOCK_PAD_Y    9
+#define DOCK_GAP     12
+#define DOCK_ITEM    48
+#define DOCK_RADIUS  24
 
-/* ── Hover animation state ───────────────────────────────────────────────── */
-static int tb_hover_mx = -1, tb_hover_my = -1;   /* last known mouse pos */
-static int tb_apps_glow  = 0;                     /* 0-256 */
-static int tb_win_glow[WM_MAX_WINDOWS];            /* per-window 0-256 */
+static int dock_x, dock_y, dock_w;
+static int hover_item = -1;
 
-void taskbar_init(void) {
-    tb_y = (int)fb.height - TB_H;
-    for (int i = 0; i < WM_MAX_WINDOWS; i++) tb_win_glow[i] = 0;
-    klog(LOG_INFO, "Taskbar: initialized");
+static uint32_t dock_mix(uint32_t base, uint32_t tint, uint8_t alpha) {
+    return fb_blend(tint, base, alpha);
 }
 
-int taskbar_get_y(void) { return tb_y; }
+typedef struct {
+    aurora_icon_id_t icon;
+    const char *title;
+    void (*launch)(void);
+} dock_item_t;
+
+static const dock_item_t dock_items[] = {
+    { AURORA_ICON_APPS,     "Apps",     NULL },
+    { AURORA_ICON_FILES,    "Files",    launch_filemanager },
+    { AURORA_ICON_TERMINAL, "Terminal", launch_terminal },
+    { AURORA_ICON_BROWSER,  "Browser",  launch_browser },
+    { AURORA_ICON_MONITOR,  "Monitor",  launch_sysmon },
+    { AURORA_ICON_SETTINGS, "Settings", launch_settings }
+};
+#define DOCK_COUNT ((int)(sizeof(dock_items) / sizeof(dock_items[0])))
+
+static int dock_count(void) { return DOCK_COUNT; }
+
+static int dock_running(const char *title, window_t **out) {
+    for (int i = 0; i < wm_window_count(); i++) {
+        window_t *win = wm_get_window(i);
+        if (win && win->visible && win->title[0] &&
+            win->title[0] == title[0]) {
+            if (out) *out = win;
+            return 1;
+        }
+    }
+    if (out) *out = NULL;
+    return 0;
+}
+
+static void dock_layout(void) {
+    int count = dock_count();
+    dock_w = DOCK_PAD_X * 2 + count * DOCK_ITEM + (count - 1) * DOCK_GAP;
+    if (dock_w > (int)fb.width - 24) dock_w = (int)fb.width - 24;
+    dock_x = ((int)fb.width - dock_w) / 2;
+    dock_y = (int)fb.height - 24 - DOCK_H;
+    if (dock_y < 0) dock_y = 0;
+}
+
+void taskbar_init(void) {
+    dock_layout();
+    hover_item = -1;
+    klog(LOG_INFO, "Dock: initialized x=%d y=%d w=%d h=%d",
+         dock_x, dock_y, dock_w, DOCK_H);
+}
+
+int taskbar_get_y(void) { dock_layout(); return dock_y; }
+
+int taskbar_contains(int x, int y) {
+    dock_layout();
+    return x >= dock_x && x < dock_x + dock_w &&
+           y >= dock_y && y < dock_y + DOCK_H;
+}
+
+static int item_at(int x, int y) {
+    dock_layout();
+    if (!taskbar_contains(x, y)) return -1;
+    int count = dock_count();
+    for (int i = 0; i < count; i++) {
+        int ix = dock_x + DOCK_PAD_X + i * (DOCK_ITEM + DOCK_GAP);
+        if (x >= ix && x < ix + DOCK_ITEM &&
+            y >= dock_y + DOCK_PAD_Y && y < dock_y + DOCK_PAD_Y + DOCK_ITEM)
+            return i;
+    }
+    return -1;
+}
 
 void taskbar_get_apps_rect(int *x, int *y, int *w, int *h) {
-    if (x) *x = TB_APPS_X;
-    if (y) *y = tb_y + TB_APPS_YOFF;
-    if (w) *w = TB_BTN_W;
-    if (h) *h = TB_APPS_H;
+    dock_layout();
+    if (x) *x = dock_x + DOCK_PAD_X;
+    if (y) *y = dock_y + DOCK_PAD_Y;
+    if (w) *w = DOCK_ITEM;
+    if (h) *h = DOCK_ITEM;
 }
 
 void taskbar_handle_mouse(int mx, int my) {
-    tb_hover_mx = mx;
-    tb_hover_my = my;
-}
-
-static void itoa_u(uint32_t v, char *buf, int w) {
-    char t[12]; int ti = 0;
-    if (v == 0) { t[ti++] = '0'; }
-    while (v) { t[ti++] = '0' + (int)(v % 10); v /= 10; }
-    int bi = 0;
-    while (bi < w - ti) buf[bi++] = ' ';
-    while (ti > 0) buf[bi++] = t[--ti];
-    buf[bi] = 0;
-}
-
-static void draw_wifi_bars(int x, int y, int connected, int signal) {
-    if (!connected) { font_puts(x, y, "~", 0x585B70, 0x1A1A2E); return; }
-    uint32_t c_hi = signal > 70 ? 0xA6E3A1 :
-                    signal > 40 ? 0xF9E2AF : 0xF38BA8;
-    int heights[3] = { 4, 8, 12 };
-    for (int i = 0; i < 3; i++) {
-        uint32_t bc = (i == 2)               ? c_hi :
-                      (i == 1 && signal >= 40) ? c_hi :
-                      (i == 0 && signal >= 20) ? c_hi : 0x45475A;
-        fb_fill_rect(x + i*5, y + (12-heights[i]), 4, heights[i], bc);
-    }
+    int next = item_at(mx, my);
+    if (next != hover_item) { hover_item = next; fb_scene_dirty = 1; }
 }
 
 void taskbar_draw(void) {
     if (!fb.initialized) return;
-    tb_y = (int)fb.height - TB_H;
+    dock_layout();
+    uint32_t bg = aurora_color(AURORA_COLOR_SURFACE);
+    fb_fill_rounded_rect(dock_x + 4, dock_y + 5, dock_w, DOCK_H, DOCK_RADIUS,
+                         dock_mix(aurora_color(AURORA_COLOR_BACKGROUND), bg, 64));
+    fb_fill_rounded_rect(dock_x + 2, dock_y + 3, dock_w, DOCK_H, DOCK_RADIUS,
+                         dock_mix(aurora_color(AURORA_COLOR_BACKGROUND), bg, 116));
+    fb_fill_rounded_rect(dock_x, dock_y, dock_w, DOCK_H, DOCK_RADIUS, bg);
+    fb_draw_rect_outline(dock_x, dock_y, dock_w, DOCK_H,
+                         aurora_color(AURORA_COLOR_BORDER_SUBTLE), 1);
+    fb_fill_rect_blend(dock_x + DOCK_RADIUS, dock_y + 1,
+                       dock_w - 2 * DOCK_RADIUS, 1,
+                       aurora_color(AURORA_COLOR_TEXT_PRIMARY), 26);
 
-    static int paint_report_budget = 2;
-    if (paint_report_budget > 0) {
-        klog(LOG_INFO, "TASKBAR PAINT y=%d h=%d apps_rect=(%d,%d,%d,%d) windows=%d",
-             tb_y, TB_H, TB_APPS_X, tb_y + TB_APPS_YOFF,
-             TB_BTN_W, TB_APPS_H, wm_window_count());
-        paint_report_budget--;
-    }
+    int count = dock_count();
+    int ix = dock_x + DOCK_PAD_X;
+    int iy = dock_y + DOCK_PAD_Y;
+    uint32_t apps_state = hover_item == 0 ? AURORA_STATE_HOVER : 0;
+    if (launcher_is_visible()) apps_state |= AURORA_STATE_SELECTED;
+    aurora_card((aurora_rect_t){ix, iy, DOCK_ITEM, DOCK_ITEM}, apps_state);
+    aurora_app_icon_id(ix + 24, iy + 24, 16, AURORA_ICON_APPS,
+                       aurora_color(AURORA_COLOR_ACCENT));
+    if (launcher_is_visible())
+        fb_fill_rounded_rect(ix + 16, dock_y + DOCK_H - 7, 16, 4, 2,
+                             aurora_color(AURORA_COLOR_ACCENT));
+    ix += DOCK_ITEM + DOCK_GAP;
 
-    /* ── Animate hover glow (advance every draw call ~30fps) ── */
-    int over_apps = (tb_hover_my >= tb_y + TB_APPS_YOFF &&
-                     tb_hover_my < tb_y + TB_APPS_YOFF + TB_APPS_H &&
-                     tb_hover_mx >= TB_APPS_X &&
-                     tb_hover_mx < TB_APPS_X + TB_BTN_W);
-    if (over_apps) tb_apps_glow = anim_clamp(tb_apps_glow + 18, 0, 256);
-    else           tb_apps_glow = anim_clamp(tb_apps_glow - 14, 0, 256);
-
-    int wc = wm_window_count();
-    for (int i = 0; i < WM_MAX_WINDOWS; i++) {
-        int bx    = 100 + i * TB_WIN_STEP;
-        int over  = (i < wc) && (tb_hover_my >= tb_y) &&
-                    (tb_hover_mx >= bx && tb_hover_mx < bx + TB_WIN_W);
-        if (over) tb_win_glow[i] = anim_clamp(tb_win_glow[i] + 18, 0, 256);
-        else      tb_win_glow[i] = anim_clamp(tb_win_glow[i] - 14, 0, 256);
-    }
-
-    /* ── Background bar ── */
-    fb_fill_rect(0, tb_y, (int)fb.width, TB_H, 0x1A1A2E);
-    fb_fill_rect(0, tb_y,     (int)fb.width, 1, 0x4A4B7A);
-    fb_fill_rect(0, tb_y + 1, (int)fb.width, 1, 0x252645);
-
-    /* ── Apps button with hover glow ── */
-    uint32_t apps_bg  = anim_color_lerp(0x252645, 0x3A3B72, tb_apps_glow);
-    uint32_t apps_rim = anim_color_lerp(0x4A4B7A, 0x8888CC, tb_apps_glow);
-    fb_fill_rounded_rect(TB_APPS_X, tb_y + TB_APPS_YOFF,
-                         TB_BTN_W, TB_APPS_H, 8, apps_bg);
-    fb_draw_rect_outline(TB_APPS_X, tb_y + TB_APPS_YOFF,
-                         TB_BTN_W, TB_APPS_H, apps_rim, 1);
-    /* Glow under-line */
-    if (tb_apps_glow > 20)
-        fb_fill_rect_blend(TB_APPS_X, tb_y + 33, TB_BTN_W, 2, COL_BLUE,
-                           (uint8_t)(tb_apps_glow * 180 / 256));
-    font_puts(TB_APPS_X + 10, tb_y + 13, "Apps", COL_BLUE, apps_bg);
-
-    /* ── Window list pills ── */
-    int bx = 100;
-    for (int i = 0; i < wc; i++) {
-        window_t *win = wm_get_window(i);
-        if (!win || win->state == WIN_MINIMIZED) continue;
-        if (bx > (int)fb.width - 280) break;
-
-        uint32_t base_col = win->focused ? 0x3A3B60 : 0x252645;
-        uint32_t hov_col  = win->focused ? 0x4A4C80 : 0x343568;
-        uint32_t btn_col  = anim_color_lerp(base_col, hov_col, tb_win_glow[i]);
-
-        fb_fill_rounded_rect(bx, tb_y + 6, TB_WIN_W, 28, 6, btn_col);
-        fb_draw_rect_outline(bx, tb_y + 6, TB_WIN_W, 28, 0x4A4B7A, 1);
-
-        /* Active indicator line */
-        if (win->focused)
-            fb_fill_rect(bx + 6, tb_y + 32, TB_WIN_W - 12, 2, COL_BLUE);
-        else if (tb_win_glow[i] > 10)
-            fb_fill_rect_blend(bx + 6, tb_y + 32, TB_WIN_W - 12, 2,
-                               COL_SURFACE2, (uint8_t)(tb_win_glow[i] * 120 / 256));
-
-        /* Title (truncated) */
-        char short_title[15]; int k = 0;
-        while (k < 14 && win->title[k]) { short_title[k] = win->title[k]; k++; }
-        short_title[k] = 0;
-        font_puts(bx + 8, tb_y + 13, short_title, COL_TEXT, btn_col);
-        bx += TB_WIN_STEP;
-    }
-
-    /* ── Right tray ── */
-    int rx = (int)fb.width - 8;
-
-    /* Clock */
-    rtc_time_t t; rtc_get_time(&t);
-    char clock_str[6];
-    clock_str[0] = '0' + t.hour   / 10; clock_str[1] = '0' + t.hour   % 10;
-    clock_str[2] = ':';
-    clock_str[3] = '0' + t.minute / 10; clock_str[4] = '0' + t.minute % 10;
-    clock_str[5] = 0;
-    rx -= 48;
-    font_puts(rx, tb_y + 13, clock_str, COL_TEXT, 0x1A1A2E);
-
-    /* Memory */
-    rx -= 8;
-    uint32_t free_mb = (uint32_t)(pmm_get_free_frames() * 4 / 1024);
-    char mem_str[8];
-    itoa_u(free_mb, mem_str, 1);
-    int mi = 0; while (mem_str[mi]) mi++;
-    mem_str[mi++] = 'M'; mem_str[mi] = 0;
-    rx -= (mi * 8 + 4);
-    font_puts(rx, tb_y + 13, mem_str, COL_SUBTEXT, 0x1A1A2E);
-
-    /* WiFi */
-    rx -= 100;
-    if (wifi_is_connected()) {
-        int sig = wifi_get_signal();
-        draw_wifi_bars(rx, tb_y + 14, 1, sig);
-        const char *ssid = wifi_get_ssid();
-        char s8[9]; int si = 0;
-        while (si < 8 && ssid[si]) { s8[si] = ssid[si]; si++; }
-        s8[si] = 0;
-        font_puts(rx + 18, tb_y + 13, s8, 0xA6E3A1, 0x1A1A2E);
-    } else if (netif_is_up()) {
-        fb_fill_rounded_rect(rx, tb_y + 9, 38, 22, 5, 0x252645);
-        fb_draw_rect_outline(rx, tb_y + 9, 38, 22, 0x4A4B7A, 1);
-        font_puts(rx + 4, tb_y + 14, "ETH", COL_BLUE, 0x252645);
-    } else {
-        draw_wifi_bars(rx, tb_y + 14, 0, 0);
-        font_puts(rx + 18, tb_y + 13, "No net", 0x585B70, 0x1A1A2E);
+    for (int i = 1; i < count; i++) {
+        window_t *win = NULL;
+        int running = dock_running(dock_items[i].title, &win);
+        uint32_t state = (running && win && win->focused) ?
+                         AURORA_STATE_SELECTED : 0;
+        if (hover_item == i) state |= AURORA_STATE_HOVER;
+        aurora_card((aurora_rect_t){ix, iy, DOCK_ITEM, DOCK_ITEM}, state);
+        aurora_app_icon_id(ix + 24, iy + 24, 16, dock_items[i].icon,
+                        !running ? aurora_color(AURORA_COLOR_TEXT_MUTED) :
+                        (win->state == WIN_MINIMIZED ?
+                        aurora_color(AURORA_COLOR_TEXT_MUTED) :
+                        (win->focused ? aurora_color(AURORA_COLOR_ACCENT) :
+                                         aurora_color(AURORA_COLOR_INFORMATION))));
+        if (running)
+            fb_fill_rounded_rect(ix + 16, dock_y + DOCK_H - 7, 16, 4, 2,
+                                 win && win->focused ?
+                                 aurora_color(AURORA_COLOR_ACCENT) :
+                                 aurora_color(AURORA_COLOR_BORDER));
+        ix += DOCK_ITEM + DOCK_GAP;
     }
 }
 
 void taskbar_handle_click(int x, int y) {
-    int apps_x, apps_y, apps_w, apps_h;
-    taskbar_get_apps_rect(&apps_x, &apps_y, &apps_w, &apps_h);
-    int inside_apps = x >= apps_x && x < apps_x + apps_w &&
-                      y >= apps_y && y < apps_y + apps_h;
-    klog(LOG_DEBUG,
-         "TASKBAR INPUT event=DOWN mouse=(%d,%d) apps_rect=(%d,%d,%d,%d) inside_apps=%s",
-         x, y, apps_x, apps_y, apps_w, apps_h,
-         inside_apps ? "yes" : "no");
-    if (y < tb_y) return;
-    if (inside_apps) {
-        klog(LOG_DEBUG, "WM HIT target=TASKBAR_APPS x=%d y=%d action=toggle_launcher",
-             x, y);
+    int hit = item_at(x, y);
+    if (hit < 0) return;
+    if (hit == 0) {
         if (launcher_is_visible()) launcher_hide();
-        else launcher_show(8, tb_y);
+        else launcher_show(x, y);
         return;
     }
-    int bx = 100;
-    int wc = wm_window_count();
-    for (int i = 0; i < wc; i++) {
-        window_t *win = wm_get_window(i);
-        if (!win) continue;
-        if (x >= bx && x < bx + TB_WIN_W) {
+    if (hit >= 1 && hit < dock_count()) {
+        window_t *win = NULL;
+        if (dock_running(dock_items[hit].title, &win)) {
             if (win->state == WIN_MINIMIZED) {
                 win->state = WIN_NORMAL;
-                wm_focus(win); wm_raise(win);
-            } else if (win->focused) {
-                wm_minimize(win);
-            } else {
-                wm_focus(win); wm_raise(win);
-            }
-            return;
+                wm_focus(win); wm_raise(win); fb_scene_dirty = 1;
+            } else if (win->focused) wm_minimize(win);
+            else { wm_focus(win); wm_raise(win); fb_scene_dirty = 1; }
+        } else if (dock_items[hit].launch) {
+            dock_items[hit].launch();
         }
-        bx += TB_WIN_STEP;
-        if (bx > (int)fb.width - 280) break;
     }
 }
 
-void taskbar_update(void) { /* called every second — draw handles the update */ }
+void taskbar_update(void) { }

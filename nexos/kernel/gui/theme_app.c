@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-int g_active_theme = 0;
+int g_active_theme = 4; /* Aurora is the canonical shell default. */
 
 const theme_def_t g_themes[THEME_COUNT] = {
     /* Catppuccin Mocha */
@@ -52,6 +52,17 @@ const theme_def_t g_themes[THEME_COUNT] = {
         0xFB4934, 0xFE8019, 0xFABD2F, 0xB8BB26,
         0x8EC07C, 0x83A598,
         { 0x282828, 0x83A598, 0xD3869B, 0xB8BB26, 0xFB4934 }
+    },
+    /* Aurora Dark — canonical NexOS shell direction */
+    {
+        "Aurora Dark",
+        0x070A12, 0x090D16, 0x05070C,
+        0x0D111B, 0x111623, 0x182033, 0x5E687F,
+        0xE7EBF5, 0xA7B0C2,
+        0x7C8CFF, 0xAEB8FF, 0xC5A8FF,
+        0xFF6868, 0xFFA86B, 0xF4C96B, 0x5ED69A,
+        0x5AD6C9, 0x78C7FF,
+        { 0x070A12, 0x7C8CFF, 0xC5A8FF, 0x5ED69A, 0xFF6868 }
     }
 };
 
@@ -59,15 +70,7 @@ void theme_apply(int id) {
     if (id < 0 || id >= THEME_COUNT) return;
     g_active_theme = id;
     const theme_def_t *th = &g_themes[id];
-    col_base     = th->base;     col_mantle   = th->mantle;
-    col_crust    = th->crust;    col_surface0 = th->surface0;
-    col_surface1 = th->surface1; col_surface2 = th->surface2;
-    col_overlay0 = th->overlay0; col_text     = th->text;
-    col_subtext  = th->subtext;  col_blue     = th->blue;
-    col_lavender = th->lavender; col_mauve    = th->mauve;
-    col_red      = th->red;      col_peach    = th->peach;
-    col_yellow   = th->yellow;   col_green    = th->green;
-    col_teal     = th->teal;     col_sky      = th->sky;
+    aurora_apply_palette(th);
     fb_scene_dirty = 1;
 }
 

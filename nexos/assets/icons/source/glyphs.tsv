@@ -1,0 +1,22 @@
+# id\tstable_id\tglyph\tcodepoint\tpurpose\ttarget_slot\tfilename
+UNI-001\tNEXOS_ICON_APPS\t◉\tU+25C9\tRail home/apps mark\tleft rail home\ticon-home
+UNI-002\tNEXOS_ICON_SEARCH\t⌕\tU+2315\tRail search mark\tleft rail search\ticon-search
+UNI-003\tNEXOS_ICON_FILES\t▣\tU+25A3\tFiles/folder mark\tFiles app and folder rows\ticon-folder
+UNI-004\tNEXOS_ICON_TERMINAL\t⌘\tU+2318\tTerminal/command mark\tTerminal app\ticon-terminal
+UNI-005\tNEXOS_ICON_VISUALIZER\t♪\tU+266A\tVisualizer/music mark\tVisualizer app\ticon-visualizer
+UNI-006\tNEXOS_ICON_SETTINGS\t⚙\tU+2699\tSettings mark\tSettings app\ticon-settings
+UNI-007\tNEXOS_ICON_BROWSER\t◎\tU+25CE\tBrowser mark\tBrowser app\ticon-browser
+UNI-008\tNEXOS_ICON_EDITOR\t✎\tU+270E\tEditor mark\tEditor app\ticon-editor
+UNI-009\tNEXOS_ICON_MONITOR\t▥\tU+25A5\tMonitor mark\tMonitor app\ticon-monitor
+UNI-010\tNEXOS_ICON_FILE\t▤\tU+25A4\tFile/document mark\tFiles rows\ticon-file
+UNI-011\tNEXOS_ICON_SYSTEM\t◫\tU+25EB\tSystem mark\tSystem launcher\ticon-system
+UNI-012\tNEXOS_ICON_THEMES\t◐\tU+25D0\tThemes mark\tThemes launcher\ticon-themes
+UNI-013\tNEXOS_ICON_CALCULATOR\t+\tU+002B\tCalculator mark\tCalculator launcher\ticon-calculator
+UNI-014\tNEXOS_ICON_CLOCK\t◷\tU+25F7\tClock mark\tClock launcher\ticon-clock
+UNI-015\tNEXOS_ICON_SNAKE\t◆\tU+25C6\tSnake mark\tSnake launcher\ticon-snake
+UNI-016\tNEXOS_ICON_BACK\t‹\tU+2039\tBack navigation\tFiles/Browser toolbar\ticon-arrow-back
+UNI-017\tNEXOS_ICON_FORWARD\t›\tU+203A\tForward navigation\tFiles/Browser toolbar\ticon-arrow-forward
+UNI-018\tNEXOS_ICON_UP\t↑\tU+2191\tParent directory\tFiles toolbar\ticon-arrow-up
+UNI-019\tNEXOS_ICON_RELOAD\t↻\tU+21BB\tReload\tBrowser toolbar\ticon-reload
+UNI-020\tNEXOS_ICON_ADDRESS\t◦\tU+25E6\tAddress marker\tBrowser address field\ticon-globe-or-site
+UNI-021\tNEXOS_ICON_MORE\t•••\tU+2022\tBrowser overflow\tBrowser toolbar\ticon-more

@@ -2,12 +2,13 @@
 #pragma once
 #include <stdint.h>
 
-#define TB_H 40
+#define TB_H 66
 
 void taskbar_init(void);
 void taskbar_draw(void);
 void taskbar_handle_click(int x, int y);
 void taskbar_handle_mouse(int mx, int my);
+int  taskbar_contains(int x, int y);
 void taskbar_update(void);
 int  taskbar_get_y(void);
 void taskbar_get_apps_rect(int *x, int *y, int *w, int *h);

@@ -1,11 +1,14 @@
 /* NexOS — kernel/gui/browser_app.c | NetSurf Browser shell | MIT License */
 #include "browser_app.h"
 #include "wm.h"
+#include "aurora.h"
 #include "../../ports/netsurf/compat/nexos_frontend.h"
 #include "../../ports/netsurf/src/netsurf/include/netsurf/keypress.h"
 #include "../../ports/netsurf/src/netsurf/desktop/browser_history.h"
 #include "../drivers/fb.h"
 #include "../drivers/font.h"
+#include "../drivers/timer.h"
+#include "../net/http.h"
 #include "../mm/heap.h"
 #include "../kernel.h"
 #include <stdint.h>
@@ -14,10 +17,10 @@
 void *kmalloc(size_t sz);
 void  kfree(void *p);
 
-#define TOOLBAR_H    38
-#define STATUSBAR_H  20
-#define BUTTON_W     28
-#define URL_X        102
+#define TOOLBAR_H    56
+#define STATUSBAR_H  32
+#define BUTTON_W     36
+#define URL_X        152
 
 static int blen(const char *s)
 {
@@ -44,6 +47,8 @@ static int bstarts(const char *s, const char *prefix)
     return 1;
 }
 
+static uint64_t browser_nav_start;
+
 static void browser_set_error(browser_app_t *b, const char *message)
 {
     bcpy(b->status, message, (int)sizeof(b->status));
@@ -55,6 +60,12 @@ void browser_netsurf_set_status(window_t *win, const char *status)
 {
     browser_app_t *b = win == NULL ? NULL : (browser_app_t *)win->userdata;
     if (b == NULL || status == NULL) return;
+    static int status_diag_budget = 24;
+    if (status_diag_budget > 0) {
+        klog(LOG_DEBUG, "T+%llu BROWSER STATUS %s",
+            (unsigned long long)(timer_get_ticks() - browser_nav_start), status);
+        status_diag_budget--;
+    }
     bcpy(b->status, status, (int)sizeof(b->status));
     wm_invalidate(win);
 }
@@ -91,6 +102,9 @@ static void browser_navigate(browser_app_t *b)
 
     if (b->netsurf == NULL || b->url_len == 0) return;
     browser_normalize_url(b);
+    browser_nav_start = timer_get_ticks();
+    http_trace_navigation_start(browser_nav_start);
+    klog(LOG_INFO, "T+0 BROWSER NAV START url=%s", b->url);
     b->state = BSTATE_LOADING;
     bcpy(b->status, "Loading...", (int)sizeof(b->status));
     wm_invalidate(b->win);
@@ -104,27 +118,40 @@ static void browser_navigate(browser_app_t *b)
 
 static void browser_paint_content(browser_app_t *b, int x, int y, int w, int h)
 {
-    fb_fill_rect(x, y, w, h, COL_BASE);
-    if (b->netsurf != NULL) {
+    fb_fill_rect(x, y, w, h, aurora_color(AURORA_COLOR_BACKGROUND));
+    if (b->netsurf != NULL && b->state != BSTATE_ERROR) {
         if (b->state == BSTATE_LOADING && browser_window_has_content(b->netsurf)) {
             b->state = BSTATE_DONE;
             bcpy(b->status, "Ready", (int)sizeof(b->status));
+            klog(LOG_INFO, "T+%llu CONTENT DONE / LOADING CLEARED",
+                (unsigned long long)(timer_get_ticks() - browser_nav_start));
         }
         nexos_netsurf_paint(b->win);
     } else if (b->state == BSTATE_ERROR) {
-        fb_fill_rounded_rect(x + 16, y + 16, w - 32, 56, 8, COL_SURFACE0);
-        fb_fill_rect(x + 16, y + 16, 4, 56, COL_RED);
-        font_puts(x + 28, y + 24, "Browser Error", COL_RED, COL_SURFACE0);
-        font_puts(x + 28, y + 42, b->status, COL_SUBTEXT, COL_SURFACE0);
+        aurora_card((aurora_rect_t){x + 18, y + 18, w - 36, 86}, 0);
+        aurora_badge((aurora_rect_t){x + 36, y + 32, 112, 24},
+                     "Network error", AURORA_COLOR_DANGER);
+        aurora_text(x + 36, y + 66, "Browser Error", AURORA_TEXT_SECTION,
+                    aurora_color(AURORA_COLOR_SURFACE));
+        aurora_text(x + 36, y + 91, b->status, AURORA_TEXT_CAPTION,
+                    aurora_color(AURORA_COLOR_SURFACE));
     }
+}
+
+static void browser_control(aurora_rect_t r, aurora_icon_id_t icon, uint32_t state) {
+    aurora_icon_button(r, NULL, state);
+    aurora_icon_draw((aurora_rect_t){r.x + 6, r.y + 6, r.w - 12, r.h - 12},
+                     icon, aurora_color((state & AURORA_STATE_DISABLED) ?
+                                         AURORA_COLOR_TEXT_DISABLED :
+                                         AURORA_COLOR_TEXT_SECONDARY));
 }
 
 static void browser_paint(window_t *win)
 {
     browser_app_t *b = win == NULL ? NULL : win->userdata;
     int wx, wy, ww, client_h, sb_y, cy, ch;
-    uint32_t url_col;
     const char *url_disp;
+    char url_tail[BROWSER_URL_MAX];
     int max_url_chars, start, cur_x;
 
     if (b == NULL) return;
@@ -133,40 +160,44 @@ static void browser_paint(window_t *win)
     ww = win->w;
     client_h = win->h - WM_TITLEBAR_H;
 
-    fb_fill_rect(wx, wy, ww, TOOLBAR_H, COL_SURFACE0);
-    fb_fill_rect_blend(wx, wy, ww, 1, 0xFFFFFF, 14);
+    fb_fill_rect(wx, wy, ww, TOOLBAR_H, aurora_color(AURORA_COLOR_SURFACE));
+    fb_fill_rect_blend(wx, wy, ww, 1,
+                       aurora_color(AURORA_COLOR_TEXT_PRIMARY), 16);
 
-    fb_fill_rounded_rect(wx + 6, wy + 5, BUTTON_W, BUTTON_W, 6, COL_SURFACE1);
-    fb_fill_rounded_rect(wx + 38, wy + 5, BUTTON_W, BUTTON_W, 6, COL_SURFACE1);
-    fb_fill_rounded_rect(wx + 70, wy + 5, BUTTON_W, BUTTON_W, 6, COL_SURFACE1);
-    font_puts(wx + 13, wy + 11, "<", COL_SUBTEXT, COL_SURFACE1);
-    font_puts(wx + 45, wy + 11, ">", COL_SUBTEXT, COL_SURFACE1);
-    font_puts(wx + 75, wy + 11, "R", COL_SUBTEXT, COL_SURFACE1);
+    browser_control((aurora_rect_t){wx + 14, wy + 10, BUTTON_W, 36},
+                    AURORA_ICON_BACK, 0);
+    browser_control((aurora_rect_t){wx + 59, wy + 10, BUTTON_W, 36},
+                    AURORA_ICON_FORWARD, 0);
+    browser_control((aurora_rect_t){wx + 104, wy + 10, BUTTON_W, 36},
+                    AURORA_ICON_RELOAD, 0);
 
-    url_col = b->address_focus ? COL_TEXT : COL_SUBTEXT;
     url_disp = b->url_len > 0 ? b->url : "Enter URL";
     int ub_x = wx + URL_X;
-    int ub_w = ww - URL_X - 8;
-    uint32_t ub_bg = b->state == BSTATE_ERROR ? 0x2A1520 : COL_BASE;
-    fb_fill_rounded_rect(ub_x, wy + 5, ub_w, 28, 6, ub_bg);
-    fb_draw_rect_outline(ub_x, wy + 5, ub_w, 28,
-                         b->address_focus ? COL_BLUE : COL_SURFACE2, 1);
-    max_url_chars = (ub_w - 16) / 8;
+    int ub_w = ww - URL_X - 14;
+    max_url_chars = (ub_w - 20) / 8;
     start = b->url_len > max_url_chars ? b->url_len - max_url_chars : 0;
-    font_puts(ub_x + 10, wy + 11, url_disp + start, url_col, ub_bg);
+    bcpy(url_tail, url_disp + start, BROWSER_URL_MAX);
+    uint32_t url_state = b->address_focus ? AURORA_STATE_FOCUSED : 0;
+    aurora_text_field((aurora_rect_t){ub_x, wy + 10, ub_w, 36},
+                      url_tail, url_state, 0);
+    if (b->state == BSTATE_ERROR)
+        fb_fill_rect_blend(ub_x + 1, wy + 11, 3, 34,
+                           aurora_color(AURORA_COLOR_DANGER), 160);
     if (b->address_focus && b->url_len < max_url_chars) {
         cur_x = ub_x + 10 + (b->url_len - start) * 8;
-        fb_fill_rect(cur_x, wy + 9, 1, 18, COL_BLUE);
+        fb_fill_rect(cur_x, wy + 16, 1, 22,
+                     aurora_color(AURORA_COLOR_ACCENT));
     }
     fb_fill_rect(wx, wy + TOOLBAR_H - 1, ww, 1, COL_SURFACE1);
 
     sb_y = wy + client_h - STATUSBAR_H;
-    fb_fill_rect(wx, sb_y, ww, STATUSBAR_H, COL_SURFACE0);
-    fb_fill_rect(wx, sb_y, ww, 1, COL_SURFACE1);
-    uint32_t pill = b->state == BSTATE_ERROR ? COL_RED :
-                    b->state == BSTATE_LOADING ? COL_YELLOW : COL_GREEN;
-    fb_fill_rounded_rect(wx + 6, sb_y + 3, 8, 14, 4, pill);
-    font_puts(wx + 18, sb_y + 4, b->status, COL_SUBTEXT, COL_SURFACE0);
+    fb_fill_rect(wx, sb_y, ww, STATUSBAR_H, aurora_color(AURORA_COLOR_SURFACE));
+    fb_fill_rect(wx, sb_y, ww, 1, aurora_color(AURORA_COLOR_BORDER_SUBTLE));
+    aurora_color_role_t status_role = b->state == BSTATE_ERROR ? AURORA_COLOR_DANGER :
+                    b->state == BSTATE_LOADING ? AURORA_COLOR_WARNING : AURORA_COLOR_SUCCESS;
+    aurora_badge((aurora_rect_t){wx + 14, sb_y + 5, 64, 22}, b->status, status_role);
+    aurora_text(wx + 92, sb_y + 9, "NetSurf • NexOS networking",
+                AURORA_TEXT_CAPTION, aurora_color(AURORA_COLOR_SURFACE));
 
     cy = wy + TOOLBAR_H;
     ch = sb_y - cy;
@@ -192,6 +223,7 @@ static void browser_key(window_t *win, char key)
         }
     } else if (b->netsurf != NULL) {
         uint32_t nskey = code;
+        int handled = 0;
         if (code == 0x80) nskey = NS_KEY_UP;
         else if (code == 0x81) nskey = NS_KEY_DOWN;
         else if (code == 0x82) nskey = NS_KEY_LEFT;
@@ -200,13 +232,31 @@ static void browser_key(window_t *win, char key)
         else if (code == 0x85) nskey = NS_KEY_TEXT_END;
         else if (code == 0x86) nskey = NS_KEY_PAGE_UP;
         else if (code == 0x87) nskey = NS_KEY_PAGE_DOWN;
-        if (!browser_window_key_press(b->netsurf, nskey)) {
-            if (code == 0x80) (void)nexos_netsurf_scroll(win, 0, -64);
-            else if (code == 0x81) (void)nexos_netsurf_scroll(win, 0, 64);
-            else if (code == 0x86) (void)nexos_netsurf_scroll(win, 0, -320);
-            else if (code == 0x87) (void)nexos_netsurf_scroll(win, 0, 320);
-            else if (code == 0x84) (void)nexos_netsurf_scroll(win, 0, -1000000);
-            else if (code == 0x85) (void)nexos_netsurf_scroll(win, 0, 1000000);
+        handled = browser_window_key_press(b->netsurf, nskey) ? 1 : 0;
+        {
+            static int key_diag_budget = 32;
+            if (key_diag_budget > 0) {
+                klog(LOG_DEBUG, "BROWSER KEY code=0x%x nskey=0x%x handled=%d",
+                     code, (unsigned int)nskey, handled);
+                key_diag_budget--;
+            }
+        }
+        if (!handled) {
+            bool scrolled = false;
+            if (code == 0x80) scrolled = nexos_netsurf_scroll(win, 0, -64);
+            else if (code == 0x81) scrolled = nexos_netsurf_scroll(win, 0, 64);
+            else if (code == 0x86) scrolled = nexos_netsurf_scroll(win, 0, -320);
+            else if (code == 0x87) scrolled = nexos_netsurf_scroll(win, 0, 320);
+            else if (code == 0x84) scrolled = nexos_netsurf_scroll(win, 0, -1000000);
+            else if (code == 0x85) scrolled = nexos_netsurf_scroll(win, 0, 1000000);
+            if (scrolled) {
+                static int scroll_key_diag_budget = 16;
+                if (scroll_key_diag_budget > 0) {
+                    klog(LOG_DEBUG, "BROWSER KEY SCROLL code=0x%x result=handled",
+                         code);
+                    scroll_key_diag_budget--;
+                }
+            }
         }
     }
     wm_invalidate(win);
@@ -249,6 +299,8 @@ static void browser_resize(window_t *win)
     if (win == NULL) return;
     content_h = win->h - WM_TITLEBAR_H - TOOLBAR_H - STATUSBAR_H;
     if (content_h < 1) content_h = 1;
+    klog(LOG_INFO, "BROWSER RESIZE w=%d h=%d viewport_w=%d viewport_h=%d",
+         win->w, win->h, win->w, content_h);
     nexos_netsurf_set_viewport(win, 0, TOOLBAR_H, win->w, content_h);
     wm_invalidate(win);
 }
@@ -266,21 +318,32 @@ static void browser_click(window_t *win, int cx, int cy, int btn)
         }
     }
 
-    if (cy >= 5 && cy < 33 && cx >= 6 && cx < 34) {
-        if (b->netsurf != NULL && browser_window_history_back_available(b->netsurf))
-            (void)browser_window_history_back(b->netsurf, false);
+    if (cy >= 10 && cy < 46 && cx >= 14 && cx < 50) {
+        nserror result = NSERROR_BAD_PARAMETER;
+        int available = b->netsurf != NULL &&
+                        browser_window_history_back_available(b->netsurf);
+        klog(LOG_INFO, "BROWSER TOOLBAR action=BACK");
+        if (available) result = browser_window_history_back(b->netsurf, false);
+        klog(LOG_INFO, "BROWSER TOOLBAR BACK available=%d result=%d",
+             available, (int)result);
         return;
     }
-    if (cy >= 5 && cy < 33 && cx >= 38 && cx < 66) {
-        if (b->netsurf != NULL && browser_window_history_forward_available(b->netsurf))
-            (void)browser_window_history_forward(b->netsurf, false);
+    if (cy >= 10 && cy < 46 && cx >= 59 && cx < 95) {
+        nserror result = NSERROR_BAD_PARAMETER;
+        int available = b->netsurf != NULL &&
+                        browser_window_history_forward_available(b->netsurf);
+        klog(LOG_INFO, "BROWSER TOOLBAR action=FORWARD");
+        if (available) result = browser_window_history_forward(b->netsurf, false);
+        klog(LOG_INFO, "BROWSER TOOLBAR FORWARD available=%d result=%d",
+             available, (int)result);
         return;
     }
-    if (cy >= 5 && cy < 33 && cx >= 70 && cx < 98) {
+    if (cy >= 10 && cy < 46 && cx >= 104 && cx < 140) {
+        klog(LOG_INFO, "BROWSER TOOLBAR action=RELOAD");
         if (b->netsurf != NULL) (void)browser_window_reload(b->netsurf, false);
         return;
     }
-    if (cy >= 5 && cy < 33 && cx >= URL_X) {
+    if (cy >= 10 && cy < 46 && cx >= URL_X) {
         b->address_focus = 1;
         wm_invalidate(win);
         return;

@@ -22,6 +22,9 @@ static volatile int mouse_last_dx;
 static volatile int mouse_last_dy;
 static volatile int mouse_last_wheel;
 static volatile int mouse_last_buttons;
+static volatile int mouse_last_raw0;
+static volatile int mouse_last_overflow_x;
+static volatile int mouse_last_overflow_y;
 static volatile int mouse_button_old;
 static volatile int mouse_button_new;
 static volatile int mouse_button_raw;
@@ -32,7 +35,6 @@ static volatile int mouse_needs_redraw = 0;
 /* ── Cursor ─────────────────────────────────────────────────────────────── */
 #define CUR_W 12
 #define CUR_H 20
-static uint32_t cursor_save[CUR_W * CUR_H];
 static int      cursor_saved_x = -1;
 static int      cursor_saved_y = -1;
 
@@ -96,12 +98,14 @@ static void mouse_irq_handler(registers_t *r) {
         }
         int dx = (int)(int8_t)mouse_bytes[1];
         int dy = -(int)(int8_t)mouse_bytes[2];
-        /* Clamp hardware overflow first */
-        if (mouse_bytes[0] & 0x40) dx = (dx > 0) ? -127 : 127;
-        if (mouse_bytes[0] & 0x80) dy = (dy > 0) ? -127 : 127;
-        /* 2× base speed + 50% boost on large deltas (|d| > 5) for fast flicks */
-        dx = dx * 2 + (dx > 5 ? dx / 2 : dx < -5 ? dx / 2 : 0);
-        dy = dy * 2 + (dy > 5 ? dy / 2 : dy < -5 ? dy / 2 : 0);
+        /* An overflow bit means the device could not represent the
+         * movement. Do not turn that condition into a fabricated 127px
+         * jump; keep the button/wheel state and discard only that axis. */
+        if (mouse_bytes[0] & 0x40) dx = 0;
+        if (mouse_bytes[0] & 0x80) dy = 0;
+        mouse_last_raw0 = mouse_bytes[0];
+        mouse_last_overflow_x = (mouse_bytes[0] & 0x40) != 0;
+        mouse_last_overflow_y = (mouse_bytes[0] & 0x80) != 0;
         mouse_tx += dx;
         mouse_ty += dy;
         if (mouse_packet_size == 4) {
@@ -136,6 +140,8 @@ void mouse_init(void) {
     mouse_packet_seq = 0; mouse_debug_seq = 0;
     mouse_last_dx = 0; mouse_last_dy = 0;
     mouse_last_wheel = 0; mouse_last_buttons = 0;
+    mouse_last_raw0 = 0;
+    mouse_last_overflow_x = 0; mouse_last_overflow_y = 0;
     mouse_button_old = 0; mouse_button_new = 0; mouse_button_raw = 0;
     mouse_button_seq = 0; mouse_button_debug_seq = 0;
 
@@ -175,7 +181,8 @@ int mouse_get_wheel(void) {
     mouse_wheel_delta = 0;
     return delta;
 }
-int mouse_take_debug(int *dx, int *dy, int *buttons, int *wheel) {
+int mouse_take_debug(int *dx, int *dy, int *buttons, int *wheel,
+                     int *raw_byte0, int *overflow_x, int *overflow_y) {
     uint32_t seq = mouse_packet_seq;
     if (seq == mouse_debug_seq) return 0;
     mouse_debug_seq = seq;
@@ -183,6 +190,9 @@ int mouse_take_debug(int *dx, int *dy, int *buttons, int *wheel) {
     if (dy) *dy = mouse_last_dy;
     if (buttons) *buttons = mouse_last_buttons;
     if (wheel) *wheel = mouse_last_wheel;
+    if (raw_byte0) *raw_byte0 = mouse_last_raw0;
+    if (overflow_x) *overflow_x = mouse_last_overflow_x;
+    if (overflow_y) *overflow_y = mouse_last_overflow_y;
     return 1;
 }
 int mouse_take_button_debug(int *old_buttons, int *new_buttons,
@@ -198,25 +208,12 @@ int mouse_take_button_debug(int *old_buttons, int *new_buttons,
 int mouse_needs_update(void) {
     int changed = 0;
 
-    /* Move both axes every poll.  The old one-axis-at-a-time update made
-     * diagonal motion lag and stalled forever when the remaining delta was
-     * one pixel because integer division rounded the step to zero. */
-    if (mouse_x != mouse_tx) {
-        int delta = mouse_tx - mouse_x;
-        int step = delta / 2;
-        if (step == 0) step = (delta > 0) ? 1 : -1;
-        mouse_x += step;
-        if ((step > 0 && mouse_x > mouse_tx) ||
-            (step < 0 && mouse_x < mouse_tx)) mouse_x = mouse_tx;
-        changed = 1;
-    }
-    if (mouse_y != mouse_ty) {
-        int delta = mouse_ty - mouse_y;
-        int step = delta / 2;
-        if (step == 0) step = (delta > 0) ? 1 : -1;
-        mouse_y += step;
-        if ((step > 0 && mouse_y > mouse_ty) ||
-            (step < 0 && mouse_y < mouse_ty)) mouse_y = mouse_ty;
+    /* Present the accumulated raw position directly. Interpolating toward
+     * it made the cursor visibly lag behind the host pointer and replay
+     * queued movement after the physical motion had stopped. */
+    if (mouse_x != mouse_tx || mouse_y != mouse_ty) {
+        mouse_x = mouse_tx;
+        mouse_y = mouse_ty;
         changed = 1;
     }
     if (changed) return 1;
@@ -226,23 +223,20 @@ int mouse_needs_update(void) {
 
 void cursor_restore(void) {
     if (cursor_saved_x < 0) return;
-    for (int cy = 0; cy < CUR_H; cy++)
-        for (int cx = 0; cx < CUR_W; cx++)
-            fb_put_pixel(cursor_saved_x + cx, cursor_saved_y + cy,
-                         cursor_save[cy * CUR_W + cx]);
+    /* The scene backbuffer is authoritative and never contains cursor
+     * pixels. Restore the complete old overlay rectangle from that scene;
+     * do not rely on a saved underlay captured before a scene change. */
+    fb_commit_rect(cursor_saved_x, cursor_saved_y, CUR_W, CUR_H);
     cursor_saved_x = -1; cursor_saved_y = -1;
 }
 
 void cursor_draw(int x, int y) {
     cursor_restore();
     cursor_saved_x = x; cursor_saved_y = y;
-    for (int cy = 0; cy < CUR_H; cy++)
-        for (int cx = 0; cx < CUR_W; cx++)
-            cursor_save[cy * CUR_W + cx] = fb_get_pixel(x + cx, y + cy);
     for (int cy = 0; cy < CUR_H; cy++) {
         for (int cx = 0; cx < CUR_W; cx++) {
-            if      (cursor_bmp[cy][cx] == 1) fb_put_pixel(x + cx, y + cy, 0x000000);
-            else if (cursor_bmp[cy][cx] == 2) fb_put_pixel(x + cx, y + cy, 0xFFFFFF);
+            if      (cursor_bmp[cy][cx] == 1) fb_present_pixel(x + cx, y + cy, 0x000000);
+            else if (cursor_bmp[cy][cx] == 2) fb_present_pixel(x + cx, y + cy, 0xFFFFFF);
         }
     }
 }

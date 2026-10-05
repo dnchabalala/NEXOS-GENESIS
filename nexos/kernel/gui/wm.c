@@ -1,6 +1,7 @@
 /* NexOS — kernel/gui/wm.c | Window Manager | MIT License */
 #include "wm.h"
 #include "desktop.h"
+#include "aurora.h"
 #include "../drivers/fb.h"
 #include "../drivers/font.h"
 #include "../mm/heap.h"
@@ -45,74 +46,35 @@ static void wm_draw_window(window_t *win) {
                 win->w + WM_SHADOW_OFF * 2 + 8,
                 win->h + WM_SHADOW_OFF * 2 + 8);
 
-    /* ── 3-layer graduated drop shadow ─────────────────────────────────── */
-    fb_fill_rect_blend(win->x + 10, win->y + 10, win->w, win->h, 0x000000, 42);
-    fb_fill_rect_blend(win->x +  6, win->y +  6, win->w, win->h, 0x000000, 24);
-    fb_fill_rect_blend(win->x +  2, win->y +  2, win->w, win->h, 0x000000, 10);
-
-    /* ── Focus outer glow ring ──────────────────────────────────────────── */
-    if (win->focused) {
-        fb_fill_rect_blend(win->x - 3, win->y - 3,
-                           win->w + 6, win->h + 6, COL_BLUE, 18);
-        fb_fill_rect_blend(win->x - 1, win->y - 1,
-                           win->w + 2, win->h + 2, COL_BLUE, 36);
-    }
-
-    /* ── Window frame ───────────────────────────────────────────────────── */
-    uint32_t frame_c = win->focused ? COL_SURFACE2 : COL_SURFACE1;
+    /* ── Bounded Aurora depth treatment ─────────────────────────────────── */
+    fb_fill_rect_blend(win->x + WM_SHADOW_OFF, win->y + WM_SHADOW_OFF,
+                       win->w, win->h,
+                       aurora_color(AURORA_COLOR_BACKGROUND), 48);
+    uint32_t frame_c = win->focused ? aurora_color(AURORA_COLOR_ELEVATED)
+                                    : aurora_color(AURORA_COLOR_INACTIVE);
     fb_fill_rounded_rect(win->x - 1, win->y - 1,
-                         win->w + 2, win->h + 2, 12, frame_c);
+                         win->w + 2, win->h + 2,
+                         AURORA_RADIUS_WINDOW, frame_c);
 
-    /* ── Titlebar base ──────────────────────────────────────────────────── */
-    uint32_t tb_col = win->focused ? 0x24253E : 0x1C1D30;
-    fb_fill_rounded_rect(win->x, win->y, win->w, WM_TITLEBAR_H, 10, tb_col);
+    /* From the frame inward, every writer sees the same rounded outer mask.
+     * This keeps titlebar and client pixels in one silhouette. */
+    fb_set_clip_rounded(win->x, win->y, win->w, win->h,
+                        AURORA_RADIUS_WINDOW);
 
-    /* Specular — bright overlay on upper half + single top-rim pixel */
-    fb_fill_rect_blend(win->x + 8,  win->y,
-                       win->w - 16, WM_TITLEBAR_H / 2 + 2, 0xFFFFFF, 8);
-    fb_fill_rect_blend(win->x + 10, win->y, win->w - 20, 1, 0xFFFFFF, 34);
-
-    /* ── Focus left accent stripe + soft glow ───────────────────────────── */
-    if (win->focused) {
-        fb_fill_rect_blend(win->x, win->y + 8,
-                           5, WM_TITLEBAR_H - 16, COL_BLUE, 28);
-        fb_fill_rect(win->x, win->y + 8, 3, WM_TITLEBAR_H - 16, COL_BLUE);
-    }
-
-    /* ── Traffic-light buttons with shadow + specular ───────────────────── */
-    int bx = win->x + win->w - WM_BTN_GAP;
-    int by = win->y + WM_TITLEBAR_H / 2;
-
-    /* per-button drop shadow */
-    fb_fill_circle(bx + 1,               by + 1, WM_BTN_R, 0x000000);
-    fb_fill_circle(bx - WM_BTN_GAP + 1,  by + 1, WM_BTN_R, 0x000000);
-    fb_fill_circle(bx - WM_BTN_GAP*2+1,  by + 1, WM_BTN_R, 0x000000);
-
-    fb_fill_circle(bx,                   by, WM_BTN_R, COL_RED);
-    fb_fill_circle(bx - WM_BTN_GAP,      by, WM_BTN_R, COL_YELLOW);
-    fb_fill_circle(bx - WM_BTN_GAP * 2,  by, WM_BTN_R, COL_GREEN);
-
-    /* specular highlight: small bright dot top-left of each button */
-    fb_fill_circle(bx - 2,                   by - 2, 2,
-                   fb_blend(0xFFFFFF, COL_RED,    160));
-    fb_fill_circle(bx - WM_BTN_GAP - 2,      by - 2, 2,
-                   fb_blend(0xFFFFFF, COL_YELLOW, 160));
-    fb_fill_circle(bx - WM_BTN_GAP * 2 - 2,  by - 2, 2,
-                   fb_blend(0xFFFFFF, COL_GREEN,  160));
-
-    /* ── Title centered in titlebar ─────────────────────────────────────── */
-    int tw = font_str_width(win->title);
-    int tx = win->x + (win->w - tw * 8) / 2;
-    int ty = win->y + (WM_TITLEBAR_H - 16) / 2;
-    font_puts(tx, ty, win->title, COL_TEXT, tb_col);
+    /* Presentation is centralized; existing WM hit geometry is unchanged. */
+    aurora_window_chrome((aurora_rect_t){win->x, win->y, win->w,
+                                         WM_TITLEBAR_H},
+                         win->title, win->focused);
 
     /* ── Client area ────────────────────────────────────────────────────── */
-    fb_set_clip(win->x, win->y + WM_TITLEBAR_H,
-                win->w, win->h - WM_TITLEBAR_H);
+    fb_set_clip_rounded(win->x, win->y, win->w, win->h,
+                        AURORA_RADIUS_WINDOW);
     fb_fill_rect(win->x, win->y + WM_TITLEBAR_H,
-                 win->w, win->h - WM_TITLEBAR_H, COL_MANTLE);
+                 win->w, win->h - WM_TITLEBAR_H,
+                 aurora_color(AURORA_COLOR_BACKGROUND));
     /* Hairline separator between titlebar and content */
-    fb_fill_rect(win->x, win->y + WM_TITLEBAR_H, win->w, 1, COL_SURFACE1);
+    fb_fill_rect(win->x, win->y + WM_TITLEBAR_H, win->w, 1,
+                 aurora_color(AURORA_COLOR_BORDER));
 
     if (win->on_paint) win->on_paint(win);
     fb_reset_clip();
@@ -236,7 +198,7 @@ void wm_toggle_maximize(window_t *win) {
         win->orig_w = win->w; win->orig_h = win->h;
         win->x = 0; win->y = 0;
         win->w = (int)fb.width;
-        win->h = (int)fb.height - 40;
+        win->h = (int)fb.height - AURORA_TASKBAR_H;
         win->state = WIN_MAXIMIZED;
     }
     if (win->on_resize) win->on_resize(win);
@@ -245,7 +207,15 @@ void wm_toggle_maximize(window_t *win) {
 
 void wm_move(window_t *win, int x, int y) {
     if (!win) return;
+    int old_x = win->x;
+    int old_y = win->y;
     win->x = x; win->y = y;
+    static int drag_diag_budget = 12;
+    if (drag_diag_budget > 0) {
+        klog(LOG_DEBUG, "DRAG old=(%d,%d,%d,%d) new=(%d,%d,%d,%d)",
+             old_x, old_y, win->w, win->h, win->x, win->y, win->w, win->h);
+        drag_diag_budget--;
+    }
     fb_scene_dirty = 1;
 }
 void wm_resize(window_t *win, int w, int h) {
@@ -257,10 +227,8 @@ void wm_resize(window_t *win, int w, int h) {
 }
 void wm_invalidate(window_t *win) {
     (void)win;
-    /* Applications request repaint through the normal frame composition.
-     * This must not dirty the desktop background: NetSurf status/content
-     * updates are frequent and should not trigger an animated full-screen
-     * repaint. */
+    /* Coalesce application/content invalidations until the next GUI frame. */
+    fb_scene_dirty = 1;
 }
 
 void wm_render_all(void) {
@@ -295,8 +263,8 @@ void wm_handle_mouse(int x, int y, int left, int right) {
         if (ny < 0) ny = 0;
         if (nx + focused_win->w > (int)fb.width)
             nx = (int)fb.width - focused_win->w;
-        if (ny + focused_win->h > (int)fb.height - 40)
-            ny = (int)fb.height - 40 - focused_win->h;
+        if (ny + focused_win->h > (int)fb.height - AURORA_TASKBAR_H)
+            ny = (int)fb.height - AURORA_TASKBAR_H - focused_win->h;
         if (nx != focused_win->x || ny != focused_win->y) {
             wm_move(focused_win, nx, ny);
         }
@@ -330,21 +298,22 @@ void wm_handle_mouse(int x, int y, int left, int right) {
         window_t *win = wins[i];
         if (!win || !win->visible || win->state == WIN_MINIMIZED) continue;
 
-        int bx = win->x + win->w - WM_BTN_GAP;
+        int bx = win->x + WM_BTN_GAP;
         int by = win->y + WM_TITLEBAR_H / 2;
 
-        /* close button */
+        /* HTML order is red/close, yellow/minimize, green/maximize from
+         * left to right.  Keep generous hit circles around the visual dots. */
         if (point_in_circle(x, y, bx, by, WM_BTN_R)) {
             if (win->on_close) win->on_close(win);
             else wm_close(win);
             return;
         }
         /* min button */
-        if (point_in_circle(x, y, bx - WM_BTN_GAP, by, WM_BTN_R)) {
+        if (point_in_circle(x, y, bx + WM_BTN_GAP, by, WM_BTN_R)) {
             wm_minimize(win); return;
         }
         /* max button */
-        if (point_in_circle(x, y, bx - WM_BTN_GAP * 2, by, WM_BTN_R)) {
+        if (point_in_circle(x, y, bx + WM_BTN_GAP * 2, by, WM_BTN_R)) {
             wm_toggle_maximize(win); return;
         }
         /* title bar drag */

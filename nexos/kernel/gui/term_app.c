@@ -1,6 +1,7 @@
 /* NexOS — kernel/gui/term_app.c | GUI Terminal application | MIT License */
 #include "term_app.h"
 #include "wm.h"
+#include "aurora.h"
 #include "../drivers/fb.h"
 #include "../drivers/font.h"
 #include "../drivers/timer.h"
@@ -129,6 +130,37 @@ static void term_exec(term_app_t *t, const char *cmd) {
 }
 
 /* ── Paint ───────────────────────────────────────────────────────────────── */
+static int term_starts_prompt(const char *s) {
+    const char *p = "[root@nexos]$ ";
+    int i = 0;
+    while (p[i] && s[i] == p[i]) i++;
+    return p[i] == 0;
+}
+
+static void term_draw_line(term_app_t *t, const char *line, int row,
+                           int x, int y, uint32_t bg) {
+    if (!line || !*line) return;
+    if (row == 0) {
+        font_aurora_puts(x, y, line, 16,
+                         aurora_color(AURORA_COLOR_TEXT_PRIMARY), bg);
+        return;
+    }
+    if (row == 1) {
+        font_aurora_puts(x, y + 1, line, 12,
+                         aurora_color(AURORA_COLOR_TEXT_MUTED), bg);
+        return;
+    }
+    if (term_starts_prompt(line)) {
+        const char *rest = line + 14;
+        font_puts(x, y, "[root@nexos]$", COL_LAVENDER, bg);
+        font_puts(x + 14 * 8, y, rest, t->fg, bg);
+    } else {
+        uint32_t color = (line[0] == 'n' && line[1] == 's' && line[2] == 'h' && line[3] == ':')
+                       ? COL_RED : t->fg;
+        font_puts(x, y, line, color, bg);
+    }
+}
+
 static void term_paint(window_t *win) {
     term_app_t *t = (term_app_t *)win->userdata;
     if (!t) return;
@@ -137,59 +169,36 @@ static void term_paint(window_t *win) {
     int by = win->y + WM_TITLEBAR_H;
     int bw = win->w;
     int bh = win->h - WM_TITLEBAR_H;
+    uint32_t bg = 0x080B11; /* canonical .term background */
+    int line_h = 18;
 
-    /* ── Status bar at bottom ── */
-    int sb_h  = 20;
-    int sb_y  = by + bh - sb_h;
-    int text_h = bh - sb_h;
+    /* HTML .term: full client surface, 20px padding, monospace content. */
+    fb_fill_rect(bx, by, bw, bh, bg);
+    fb_fill_rect_blend(bx, by, 2, bh,
+                       aurora_color(AURORA_COLOR_ACCENT), 44);
 
-    /* Terminal body */
-    fb_fill_rect(bx, by, bw, text_h, t->bg);
-
-    /* Left gutter accent — subtle 2px blue line */
-    fb_fill_rect_blend(bx, by, 2, text_h, COL_BLUE, 60);
-
-    /* Text rows */
-    for (int r = 0; r < TERM_ROWS; r++) {
+    int visible_rows = (bh - TERM_PAD * 2) / line_h;
+    if (visible_rows < 1) visible_rows = 1;
+    int first = t->row >= visible_rows ? t->row - visible_rows + 1 : 0;
+    int text_x = bx + 20;
+    int text_y = by + 20;
+    for (int r = first; r < TERM_ROWS && r < first + visible_rows; r++) {
         if (!t->buf[r][0] && r > t->row) break;
-        int ry = by + TERM_PAD + r * 16;
-        if (ry + 16 > sb_y) break;
-        font_puts(bx + TERM_PAD + 4, ry, t->buf[r], t->fg, t->bg);
+        term_draw_line(t, t->buf[r], r, text_x,
+                       text_y + (r - first) * line_h, bg);
     }
 
-    /* Blinking cursor — thin 2px underline style */
+    /* Blinking cursor remains bounded to the terminal client. */
     uint64_t tick = timer_get_ticks();
     if ((tick / 500) % 2 == 0) {
-        int cx = bx + TERM_PAD + 4 + t->col * 8;
-        int cy = by + TERM_PAD + t->row * 16;
-        if (cy + 14 < sb_y) {
-            /* Underline cursor */
-            fb_fill_rect(cx, cy + 14, 8, 2, COL_BLUE);
-            /* Faint character highlight behind cursor pos */
-            fb_fill_rect_blend(cx, cy, 8, 14, COL_BLUE, 30);
+        int cx = text_x + t->col * 8;
+        int cy = text_y + (t->row - first) * line_h;
+        if (t->row >= first && cy + 16 < by + bh - TERM_PAD) {
+            fb_fill_rect(cx, cy + 14, 8, 2,
+                         aurora_color(AURORA_COLOR_ACCENT));
+            fb_fill_rect_blend(cx, cy, 8, 14,
+                               aurora_color(AURORA_COLOR_ACCENT), 30);
         }
-    }
-
-    /* ── Status bar ── */
-    fb_fill_rect(bx, sb_y, bw, sb_h, COL_SURFACE0);
-    fb_fill_rect(bx, sb_y, bw, 1, COL_SURFACE1);
-    /* Colored mode pill */
-    fb_fill_rounded_rect(bx + 6, sb_y + 3, 44, 14, 4, COL_GREEN);
-    font_puts(bx + 8, sb_y + 5, "SHELL", COL_BASE, COL_GREEN);
-    font_puts(bx + 58, sb_y + 4, "NexOS Terminal", COL_SUBTEXT, COL_SURFACE0);
-    /* Right: row/col indicator */
-    {
-        char rc[16]; int ri = 0;
-        char tmp[8]; int ti = 0;
-        int rv = t->row + 1;
-        if (!rv) { tmp[ti++] = '0'; } else while (rv) { tmp[ti++] = '0'+rv%10; rv/=10; }
-        while (ti > 0) rc[ri++] = tmp[--ti];
-        rc[ri++] = ':'; ti = 0;
-        int cv = t->col;
-        if (!cv) { tmp[ti++] = '0'; } else while (cv) { tmp[ti++] = '0'+cv%10; cv/=10; }
-        while (ti > 0) rc[ri++] = tmp[--ti];
-        rc[ri] = 0;
-        font_puts(bx + bw - ri * 8 - 10, sb_y + 4, rc, COL_OVERLAY0, COL_SURFACE0);
     }
 }
 
@@ -251,8 +260,8 @@ term_app_t *term_create(int x, int y) {
     win->on_close = term_close;
     win->userdata = t;
 
-    term_puts(t, "NexOS Terminal v0.1\n");
-    term_puts(t, "Ctrl+T=New  Ctrl+F=Files  Ctrl+I=SysInfo  Right-click=Apps\n");
+    term_puts(t, "NexOS Terminal - native shell\n");
+    term_puts(t, "Type help for commands.\n\n");
     term_prompt(t);
 
     if (!g_active_term) g_active_term = t;

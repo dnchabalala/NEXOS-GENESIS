@@ -1,6 +1,7 @@
 /* NexOS — kernel/drivers/font.c | 8x16 IBM VGA bitmap font renderer | MIT License */
 #include "font.h"
 #include "fb.h"
+#include "aurora_font_atlas.h"
 #include <stdarg.h>
 #include <stdint.h>
 
@@ -252,6 +253,75 @@ int font_str_width(const char *s) {
 
 int font_str_width2x(const char *s) {
     return font_str_width(s) * 16;
+}
+
+static const aurora_font_size_t *aurora_font_for(int requested) {
+    const aurora_font_size_t *best = &aurora_font_sizes[0];
+    int best_delta = requested > best->cell ? requested - best->cell : best->cell - requested;
+    for (int i = 1; i < AURORA_FONT_SIZE_COUNT; i++) {
+        int delta = requested > aurora_font_sizes[i].cell ?
+                    requested - aurora_font_sizes[i].cell :
+                    aurora_font_sizes[i].cell - requested;
+        if (delta < best_delta) {
+            best = &aurora_font_sizes[i];
+            best_delta = delta;
+        }
+    }
+    return best;
+}
+
+static int aurora_glyph_index(const aurora_font_size_t *font, unsigned char c) {
+    (void)font;
+    if (c < AURORA_FONT_FIRST || c >= AURORA_FONT_FIRST + AURORA_FONT_COUNT)
+        return '?' - AURORA_FONT_FIRST;
+    return (int)c - AURORA_FONT_FIRST;
+}
+
+int font_aurora_str_width(const char *s, int pixel_height) {
+    const aurora_font_size_t *font = aurora_font_for(pixel_height);
+    int width = 0;
+    while (*s) {
+        if (*s != '\n') {
+            int index = aurora_glyph_index(font, (unsigned char)*s++);
+            width += font->widths[index] + 1;
+        } else {
+            s++;
+        }
+    }
+    return width > 0 ? width - 1 : 0;
+}
+
+void font_aurora_puts(int x, int y, const char *s, int pixel_height,
+                      uint32_t fg, uint32_t bg) {
+    const aurora_font_size_t *font = aurora_font_for(pixel_height);
+    int origin_x = x;
+    int cell = font->cell;
+    int bytes = font->row_bytes;
+    while (*s) {
+        unsigned char c = (unsigned char)*s++;
+        if (c == '\n') { x = origin_x; y += cell; continue; }
+        int index = aurora_glyph_index(font, c);
+        const uint8_t *glyph = font->bits + index * cell * bytes;
+        for (int row = 0; row < cell; row++) {
+            int py = y + row;
+            if (py < 0 || py >= (int)fb.height) continue;
+            for (int col = 0; col < cell; col++) {
+                int px = x + col;
+                if (px < 0 || px >= (int)fb.width || !fb_clip_contains(px, py))
+                    continue;
+                uint8_t bits = glyph[row * bytes + col / 8];
+                if (bits & (uint8_t)(0x80u >> (col & 7))) {
+                    /* The atlas is an alpha mask.  Reading the current draw
+                     * target keeps text transparent over glass and cards. */
+                    uint32_t under = fb_get_pixel(px, py);
+                    fb_put_pixel(px, py, fb_blend(fg, under, 235));
+                } else if (bg != 0) {
+                    fb_put_pixel(px, py, bg);
+                }
+            }
+        }
+        x += font->widths[index] + 1;
+    }
 }
 
 void font_printf(int x, int y, uint32_t fg, uint32_t bg, const char *fmt, ...) {

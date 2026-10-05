@@ -5,36 +5,37 @@
 
 framebuffer_t fb = {0};
 
+#define FB_GUARD_BYTES 16u
+#define FB_GUARD_VALUE 0xA5C3F17Eu
+
 static int clip_x0;
 static int clip_y0;
 static int clip_x1;
 static int clip_y1;
+static int clip_radius;
+static int clip_shape_x;
+static int clip_shape_y;
+static int clip_shape_w;
+static int clip_shape_h;
+
+static int fb_clip_shape_contains(int x, int y) {
+    if (clip_radius <= 0) return 1;
+    int r = clip_radius;
+    int left = clip_shape_x, top = clip_shape_y;
+    int right = left + clip_shape_w - 1, bottom = top + clip_shape_h - 1;
+    if ((x >= left + r && x <= right - r) ||
+        (y >= top + r && y <= bottom - r)) return 1;
+    int cx = x < left + r ? left + r : right - r;
+    int cy = y < top + r ? top + r : bottom - r;
+    int dx = x - cx, dy = y - cy;
+    return dx * dx + dy * dy <= r * r;
+}
 
 static uint32_t *fb_target(void) {
     return fb.draw_addr != NULL ? fb.draw_addr : fb.addr;
 }
 
 int fb_scene_dirty = 1;
-
-/* ── Catppuccin Mocha defaults ─────────────────────────────────────────── */
-uint32_t col_base     = 0x1E1E2E;
-uint32_t col_mantle   = 0x181825;
-uint32_t col_crust    = 0x11111B;
-uint32_t col_surface0 = 0x313244;
-uint32_t col_surface1 = 0x45475A;
-uint32_t col_surface2 = 0x585B70;
-uint32_t col_overlay0 = 0x6C7086;
-uint32_t col_text     = 0xCDD6F4;
-uint32_t col_subtext  = 0xA6ADC8;
-uint32_t col_blue     = 0x89B4FA;
-uint32_t col_lavender = 0xB4BEFE;
-uint32_t col_mauve    = 0xCBA6F7;
-uint32_t col_red      = 0xF38BA8;
-uint32_t col_peach    = 0xFAB387;
-uint32_t col_yellow   = 0xF9E2AF;
-uint32_t col_green    = 0xA6E3A1;
-uint32_t col_teal     = 0x94E2D5;
-uint32_t col_sky      = 0x89DCEB;
 
 void fb_init(uint64_t addr, uint32_t w, uint32_t h,
              uint32_t pitch, uint8_t bpp) {
@@ -45,6 +46,8 @@ void fb_init(uint64_t addr, uint32_t w, uint32_t h,
     fb.pitch       = pitch;
     fb.bpp         = bpp;
     fb.initialized = 1;
+    fb.draw_alloc_base = NULL;
+    fb.draw_alloc_bytes = 0;
     fb_reset_clip();
 }
 
@@ -53,14 +56,35 @@ int fb_enable_backbuffer(void) {
         return fb.draw_addr != NULL;
 
     size_t bytes = (size_t)fb.pitch * (size_t)fb.height;
-    uint32_t *buffer = (uint32_t *)kmalloc(bytes);
-    if (buffer == NULL) return 0;
+    uint8_t *raw = (uint8_t *)kmalloc(bytes + FB_GUARD_BYTES * 2u);
+    if (raw == NULL) return 0;
+    uint32_t *before = (uint32_t *)raw;
+    uint32_t *after = (uint32_t *)(raw + FB_GUARD_BYTES + bytes);
+    for (unsigned i = 0; i < FB_GUARD_BYTES / sizeof(uint32_t); i++) {
+        before[i] = FB_GUARD_VALUE;
+        after[i] = FB_GUARD_VALUE;
+    }
+    uint32_t *buffer = (uint32_t *)(raw + FB_GUARD_BYTES);
     for (uint32_t y = 0; y < fb.height; y++) {
         uint8_t *dst = (uint8_t *)buffer + (size_t)y * fb.pitch;
         const uint8_t *src = (const uint8_t *)fb.addr + (size_t)y * fb.pitch;
         for (uint32_t x = 0; x < fb.pitch; x++) dst[x] = src[x];
     }
     fb.draw_addr = buffer;
+    fb.draw_alloc_base = raw;
+    fb.draw_alloc_bytes = (uint32_t)bytes;
+    return 1;
+}
+
+int fb_backbuffer_guards_ok(void) {
+    if (!fb.draw_addr || !fb.draw_alloc_base) return 1;
+    uint8_t *raw = (uint8_t *)fb.draw_alloc_base;
+    uint32_t *before = (uint32_t *)raw;
+    uint32_t *after = (uint32_t *)(raw + FB_GUARD_BYTES + fb.draw_alloc_bytes);
+    for (unsigned i = 0; i < FB_GUARD_BYTES / sizeof(uint32_t); i++) {
+        if (before[i] != FB_GUARD_VALUE || after[i] != FB_GUARD_VALUE)
+            return 0;
+    }
     return 1;
 }
 
@@ -71,6 +95,37 @@ void fb_commit(void) {
         const uint8_t *src = (const uint8_t *)fb.draw_addr + (size_t)y * fb.pitch;
         for (uint32_t x = 0; x < fb.pitch; x++) dst[x] = src[x];
     }
+}
+
+void fb_commit_rect(int x, int y, int w, int h) {
+    if (!fb.initialized || fb.draw_addr == NULL || w <= 0 || h <= 0)
+        return;
+
+    int x1 = x + w;
+    int y1 = y + h;
+    if (x < 0) x = 0;
+    if (y < 0) y = 0;
+    if (x1 > (int)fb.width) x1 = (int)fb.width;
+    if (y1 > (int)fb.height) y1 = (int)fb.height;
+    if (x >= x1 || y >= y1) return;
+
+    for (int row = y; row < y1; row++) {
+        uint32_t *dst = (uint32_t *)((uint8_t *)fb.addr +
+                                     (size_t)row * fb.pitch) + x;
+        const uint32_t *src = (const uint32_t *)((const uint8_t *)fb.draw_addr +
+                                                 (size_t)row * fb.pitch) + x;
+        for (int col = x; col < x1; col++)
+            dst[col - x] = src[col - x];
+    }
+}
+
+void fb_present_pixel(int x, int y, uint32_t color) {
+    if (!fb.initialized || (unsigned)x >= fb.width ||
+        (unsigned)y >= fb.height)
+        return;
+    uint32_t *row = (uint32_t *)((uint8_t *)fb.addr +
+                                 (size_t)y * fb.pitch);
+    row[x] = color;
 }
 
 uint32_t *fb_draw_addr(void) { return fb_target(); }
@@ -88,15 +143,30 @@ void fb_set_clip(int x, int y, int w, int h) {
     if (x1 > (int)fb.width) x1 = (int)fb.width;
     if (y1 > (int)fb.height) y1 = (int)fb.height;
     clip_x0 = x; clip_y0 = y; clip_x1 = x1; clip_y1 = y1;
+    clip_radius = 0;
+}
+
+void fb_set_clip_rounded(int x, int y, int w, int h, int radius) {
+    fb_set_clip(x, y, w, h);
+    if (clip_x1 <= clip_x0 || clip_y1 <= clip_y0) return;
+    clip_shape_x = x;
+    clip_shape_y = y;
+    clip_shape_w = w;
+    clip_shape_h = h;
+    clip_radius = radius < 0 ? 0 : radius;
+    if (clip_radius * 2 > w) clip_radius = w / 2;
+    if (clip_radius * 2 > h) clip_radius = h / 2;
 }
 
 void fb_reset_clip(void) {
     clip_x0 = 0; clip_y0 = 0;
     clip_x1 = (int)fb.width; clip_y1 = (int)fb.height;
+    clip_radius = 0;
 }
 
 int fb_clip_contains(int x, int y) {
-    return x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1;
+    return x >= clip_x0 && x < clip_x1 && y >= clip_y0 && y < clip_y1 &&
+           fb_clip_shape_contains(x, y);
 }
 
 void fb_put_pixel(int x, int y, uint32_t color) {
@@ -129,6 +199,17 @@ void fb_fill_rect(int x, int y, int w, int h, uint32_t c) {
     if (x < 0) x = 0;
     if (y < 0) y = 0;
     if (x1 <= x || y1 <= y) return;
+
+    /* Rounded window masks are uncommon and bounded to a single window
+     * paint.  Use the pixel-safe path there so client content cannot escape
+     * the authoritative outer silhouette. */
+    if (clip_radius > 0) {
+        for (int row = y; row < y1; row++)
+            for (int col = x; col < x1; col++)
+                if (fb_clip_shape_contains(col, row))
+                    fb_put_pixel(col, row, c);
+        return;
+    }
 
     /* Pack two pixels into one 64-bit word for wide-store loop */
     uint64_t c2 = ((uint64_t)c << 32) | c;

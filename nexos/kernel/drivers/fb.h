@@ -10,6 +10,10 @@ typedef struct {
     uint32_t  pitch;
     uint8_t   bpp;
     uint8_t   initialized;
+    /* Debug metadata for the GUI backbuffer.  The allocation itself remains
+     * opaque to callers; these fields let the compositor verify its bounds. */
+    void     *draw_alloc_base;
+    uint32_t  draw_alloc_bytes;
 } framebuffer_t;
 
 extern framebuffer_t fb;
@@ -62,9 +66,16 @@ void     fb_init(uint64_t addr, uint32_t w, uint32_t h,
 /* Enable the GUI render target after early console/framebuffer users have
  * finished.  Drawing then happens off-screen until fb_commit(). */
 int      fb_enable_backbuffer(void);
+int      fb_backbuffer_guards_ok(void);
 void     fb_commit(void);
+/* Present only a bounded region of the composed backbuffer.  This is used
+ * for cursor-only updates; scene composition still uses fb_commit(). */
+void     fb_commit_rect(int x, int y, int w, int h);
+/* Present a transient overlay pixel without changing the scene backbuffer. */
+void     fb_present_pixel(int x, int y, uint32_t color);
 uint32_t *fb_draw_addr(void);
 void     fb_set_clip(int x, int y, int w, int h);
+void     fb_set_clip_rounded(int x, int y, int w, int h, int radius);
 void     fb_reset_clip(void);
 int      fb_clip_contains(int x, int y);
 void     fb_put_pixel(int x, int y, uint32_t color);

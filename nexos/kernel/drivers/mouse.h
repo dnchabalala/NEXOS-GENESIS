@@ -10,7 +10,8 @@ int     mouse_left(void);
 int     mouse_right(void);
 int     mouse_needs_update(void);
 int     mouse_get_wheel(void);
-int     mouse_take_debug(int *dx, int *dy, int *buttons, int *wheel);
+int     mouse_take_debug(int *dx, int *dy, int *buttons, int *wheel,
+                         int *raw_byte0, int *overflow_x, int *overflow_y);
 int     mouse_take_button_debug(int *old_buttons, int *new_buttons,
                                 int *raw_byte0);
 void    cursor_restore(void);

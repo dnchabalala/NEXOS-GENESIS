@@ -2,6 +2,13 @@
 
 A custom x86_64 operating system written from scratch in C and Assembly (NASM).
 
+## Current Development Status
+
+Development is currently frozen pending Phase 4B Settings and Browser visual
+and physical acceptance. See the [session handoff](../docs/NEXOS_SESSION_HANDOFF.md),
+[current status](../docs/NEXOS_CURRENT_STATUS.md), and
+[build/run guide](../docs/NEXOS_BUILD_AND_RUN.md) before continuing.
+
 ## Features
 
 ### Kernel

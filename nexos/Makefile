@@ -49,6 +49,12 @@ NETSURF_CFLAGS = -Iports/netsurf/src -Iports/netsurf/src/netsurf \
 	-Iports/netsurf/src/libdom/include -Iports/netsurf/src/libnsfb/include
 CFLAGS += $(NETSURF_CFLAGS)
 
+# Temporary framebuffer checkpoint selector.  Keep the normal build at zero;
+# diagnostic images can be produced with GUI_DEBUG_STAGE=n without changing
+# the runtime shell.
+GUI_DEBUG_STAGE ?= 0
+CFLAGS += -DGUI_DEBUG_STAGE=$(GUI_DEBUG_STAGE)
+
 ifneq ($(NATIVE_TLS_TEST),)
 CFLAGS += -DNEXOS_NATIVE_TLS_TEST
 endif
@@ -113,6 +119,8 @@ KERNEL_C_SOURCES = \
         $(KERNEL)/drivers/font.c \
         $(KERNEL)/drivers/console.c \
         $(KERNEL)/drivers/mouse.c \
+        $(KERNEL)/gui/aurora.c \
+        $(KERNEL)/gui/shell.c \
         $(KERNEL)/gui/wm.c \
         $(KERNEL)/gui/desktop.c \
         $(KERNEL)/gui/taskbar.c \
@@ -163,11 +171,17 @@ DISK_IMG = $(BUILD)/nexos_disk.img
 
 .PHONY: all kernel iso clean run run-browser run-browser-interactive run-debug run-with-disk disk \
         install install-usb run-vbox run-vmware run-installer check
+.PHONY: aurora-assets
 
 .PHONY: netsurf-sources netsurf-config netsurf-deps netsurf-adapter-check netsurf-native-objects netsurf-native-deps netsurf-native-frontend netsurf-native-link-probe netsurf-native-kernel-link tls-source tls-check tls-host-test \
 		tls-freestanding native-tls test-tcp netsurf-native-kernel-test netsurf-native-run netsurf-native-gui-object
 
 -include $(KERNEL_DEPS)
+
+aurora-assets: $(KERNEL)/drivers/aurora_font_atlas.h
+
+$(KERNEL)/drivers/aurora_font_atlas.h: $(TOOLS)/gen_aurora_assets.py
+	@$(PYTHON) $(TOOLS)/gen_aurora_assets.py
 
 netsurf-sources:
 	@chmod +x $(TOOLS)/netsurf_fetch_sources.sh

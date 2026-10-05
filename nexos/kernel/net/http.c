@@ -6,6 +6,12 @@
 #include "../kernel.h"
 #include "../mm/heap.h"
 #include "../drivers/timer.h"
+
+/* Detailed fetch timelines are a diagnostic build option, not normal
+ * browser output.  Keep the high-level klog failures below always active. */
+#ifndef NEXOS_HTTP_TRACE
+#define NEXOS_HTTP_TRACE 0
+#endif
 #include "../../ports/tls/nexos_tls.h"
 #include "../../ports/tls/nexos_tls_tcp.h"
 
@@ -14,8 +20,65 @@
 
 /* ── static TCP connection (one HTTP request at a time) ────────────────────  */
 static tcp_conn_t http_conn;
+static int http_trace_id;
+static uint64_t http_trace_start;
+static uint64_t http_trace_navigation_epoch;
+static int http_trace_navigation_active;
+static int http_trace_active;
 extern const unsigned char nexos_tls_ca_start[];
 extern const unsigned char nexos_tls_ca_end[];
+
+void http_trace_begin(int fetch_id, const char *url) {
+#if NEXOS_HTTP_TRACE
+    http_trace_id = fetch_id;
+    http_trace_start = timer_get_ticks();
+    http_trace_active = 1;
+    klog(LOG_INFO, "T+%llu FETCH #%d HTTP START url=%s",
+         (unsigned long long)http_trace_elapsed(), fetch_id, url);
+#else
+    (void)fetch_id;
+    (void)url;
+#endif
+}
+
+void http_trace_navigation_start(uint64_t start)
+{
+    http_trace_navigation_epoch = start;
+    http_trace_navigation_active = 1;
+}
+
+uint64_t http_trace_elapsed(void)
+{
+    uint64_t now = timer_get_ticks();
+    if (http_trace_navigation_active)
+        return now - http_trace_navigation_epoch;
+    return now - http_trace_start;
+}
+
+void http_trace_event(const char *stage, int value) {
+#if NEXOS_HTTP_TRACE
+    if (!http_trace_active) return;
+    klog(LOG_INFO, "T+%llu FETCH #%d %s value=%d",
+         (unsigned long long)http_trace_elapsed(),
+         http_trace_id, stage, value);
+#else
+    (void)stage;
+    (void)value;
+#endif
+}
+
+void http_trace_end(int success) {
+#if NEXOS_HTTP_TRACE
+    if (!http_trace_active) return;
+    klog(LOG_INFO, "T+%llu FETCH #%d HTTP %s duration=%llu",
+         (unsigned long long)http_trace_elapsed(),
+         http_trace_id, success ? "COMPLETE" : "FAILED",
+         (unsigned long long)(timer_get_ticks() - http_trace_start));
+    http_trace_active = 0;
+#else
+    (void)success;
+#endif
+}
 
 /* ── string helpers ──────────────────────────────────────────────────────── */
 static void h_strcpy(char *d, const char *s, int max) {
@@ -109,8 +172,29 @@ static int header_value_len(const uint8_t *p, const uint8_t *end) {
     return (int)(q - p);
 }
 
+static uint32_t header_decimal(const uint8_t *p, int len, int *valid)
+{
+    uint32_t value = 0;
+    int digits = 0;
+    int i = 0;
+
+    while (i < len && (p[i] == ' ' || p[i] == '\t')) i++;
+    while (i < len && p[i] >= '0' && p[i] <= '9') {
+        if (value > 0xffffffffU / 10U) {
+            *valid = 0;
+            return 0;
+        }
+        value = value * 10U + (uint32_t)(p[i] - '0');
+        digits++;
+        i++;
+    }
+    while (i < len && (p[i] == ' ' || p[i] == '\t')) i++;
+    *valid = digits != 0 && i == len;
+    return value;
+}
+
 static int has_chunked_encoding(const uint8_t *p, int len) {
-    for (int i = 0; i + 7 < len; i++) {
+    for (int i = 0; i + 7 <= len; i++) {
         if ((p[i] == 'c' || p[i] == 'C') &&
             (p[i+1] == 'h' || p[i+1] == 'H') &&
             (p[i+2] == 'u' || p[i+2] == 'U') &&
@@ -149,6 +233,48 @@ static uint32_t decode_chunked(uint8_t *data, uint32_t len) {
         for (uint32_t i = 0; i < size; i++) data[dst++] = data[src++];
         if (src + 1 >= len || data[src] != '\r' || data[src+1] != '\n') return 0;
         src += 2;
+    }
+    return 0;
+}
+
+/* Return true once a chunked body has reached its terminal zero-size chunk
+ * and trailers.  This is deliberately bounded to the received buffer. */
+static int chunked_complete(const uint8_t *data, uint32_t len)
+{
+    uint32_t pos = 0;
+    while (pos < len) {
+        uint32_t size = 0;
+        int digits = 0;
+        while (pos < len && data[pos] != '\r' && data[pos] != '\n') {
+            int v;
+            if (data[pos] == ';') {
+                while (pos < len && data[pos] != '\r' && data[pos] != '\n') pos++;
+                break;
+            }
+            v = hex_value(data[pos++]);
+            if (v < 0) return 0;
+            size = (size << 4) | (uint32_t)v;
+            digits++;
+            if (size > HTTP_BUF_SIZE) return 0;
+        }
+        if (!digits || pos + 1 >= len || data[pos] != '\r' || data[pos + 1] != '\n')
+            return 0;
+        pos += 2;
+        if (size == 0) {
+            /* Empty trailer section is terminated by one additional CRLF;
+             * non-empty trailers are terminated by the same blank line. */
+            while (pos + 1 < len) {
+                if (data[pos] == '\r' && data[pos + 1] == '\n') return 1;
+                while (pos + 1 < len && !(data[pos] == '\r' && data[pos + 1] == '\n')) pos++;
+                if (pos + 1 >= len) return 0;
+                pos += 2;
+            }
+            return 0;
+        }
+        if (pos + size + 2 > len) return 0;
+        pos += size;
+        if (data[pos] != '\r' || data[pos + 1] != '\n') return 0;
+        pos += 2;
     }
     return 0;
 }
@@ -230,29 +356,40 @@ http_response_t *http_get(const char *url) {
         dst_ip = ((uint32_t)a0 << 24) | ((uint32_t)a1 << 16)
                | ((uint32_t)a2 <<  8) | (uint32_t)a3;
     } else {
+        http_trace_event("DNS START", 0);
         if (dns_resolve(host, host_ip) < 0) {
+            http_trace_event("DNS FAILED", -1);
+            http_trace_end(0);
             klog(LOG_WARN, "HTTP: DNS failed for %s", host);
             return 0;
         }
+        http_trace_event("DNS COMPLETE", 0);
         dst_ip = ((uint32_t)host_ip[0] << 24) | ((uint32_t)host_ip[1] << 16)
                | ((uint32_t)host_ip[2] <<  8) |  host_ip[3];
     }
 
     /* Connect */
+    http_trace_event("TCP START", (int)port);
     if (tcp_connect(&http_conn, dst_ip, port) < 0) {
+        http_trace_event("TCP FAILED", -1);
+        http_trace_end(0);
         klog(LOG_WARN, "HTTP: TCP connect failed to %s:%d", host, (int)port);
         return 0;
     }
+    http_trace_event("TCP CONNECTED", (int)port);
 
     nexos_tls_t tls;
     int tls_active = 0;
     if (is_https) {
+        http_trace_event("TLS START", 0);
         nexos_tls_io_t io;
         nexos_tls_tcp_io(&io, &http_conn);
         size_t ca_len = (size_t)(nexos_tls_ca_end - nexos_tls_ca_start);
         int tls_rc = nexos_tls_init(&tls, &io, host, nexos_tls_ca_start, ca_len);
         if (!tls_rc) tls_rc = nexos_tls_handshake(&tls);
         if (tls_rc) {
+            http_trace_event("TLS FAILED", tls_rc);
+            http_trace_end(0);
             klog(LOG_WARN, "HTTPS: TLS failed for %s rc=%d verify=0x%x",
                  host, tls_rc, nexos_tls_verify_result(&tls));
             nexos_tls_free(&tls);
@@ -260,6 +397,7 @@ http_response_t *http_get(const char *url) {
             return 0;
         }
         tls_active = 1;
+        http_trace_event("TLS COMPLETE", 0);
         klog(LOG_INFO, "HTTPS: TLS=%s verify=0x%x hostname=%s",
              nexos_tls_version(&tls), nexos_tls_verify_result(&tls), host);
     }
@@ -271,10 +409,13 @@ http_response_t *http_get(const char *url) {
         ? nexos_tls_write(&tls, req, (size_t)req_len)
         : tcp_send(&http_conn, req, (uint16_t)req_len);
     if (send_rc < 0) {
+        http_trace_event("HTTP REQUEST FAILED", send_rc);
+        http_trace_end(0);
         if (tls_active) nexos_tls_free(&tls);
         tcp_close(&http_conn);
         return 0;
     }
+    http_trace_event("HTTP REQUEST SENT", req_len);
 
     /* Receive full response */
     uint8_t *resp_buf = (uint8_t *)kmalloc(HTTP_BUF_SIZE);
@@ -285,24 +426,82 @@ http_response_t *http_get(const char *url) {
     }
 
     uint32_t total = 0;
+    uint32_t expected_total = 0;
+    int response_body_framing = 0; /* 1=Content-Length, 2=chunked */
+    int header_end = -1;
+    unsigned int recv_calls = 0;
+    unsigned int read_calls = 0;
+    unsigned int no_data_calls = 0;
+    unsigned int logged_reads = 0;
     uint64_t deadline = timer_get_ticks() + HTTP_RECV_MS;
     while (timer_get_ticks() < deadline && total < HTTP_BUF_SIZE - 1) {
+        recv_calls++;
         int n = tls_active
             ? nexos_tls_read(&tls, resp_buf + total,
                              HTTP_BUF_SIZE - 1 - total, 500)
             : tcp_recv(&http_conn, resp_buf + total,
                        (uint16_t)(HTTP_BUF_SIZE - 1 - total), 500);
         if (n > 0) {
+            if (total == 0) http_trace_event("HTTP FIRST BYTE", n);
             total += (uint32_t)n;
+            read_calls++;
+            if (logged_reads < 20) {
+                http_trace_event("HTTP READ", n);
+                logged_reads++;
+            }
             deadline = timer_get_ticks() + HTTP_RECV_MS; /* reset on data */
+        } else {
+            no_data_calls++;
+        }
+
+        if (header_end < 0) {
+            header_end = find_body(resp_buf, total);
+            if (header_end >= 0) {
+                const uint8_t *length = find_header(resp_buf,
+                    (uint32_t)header_end, "Content-Length", 14);
+                const uint8_t *encoding = find_header(resp_buf,
+                    (uint32_t)header_end, "Transfer-Encoding", 17);
+                if (length) {
+                    int valid = 0;
+                    uint32_t body_len = header_decimal(length,
+                        header_value_len(length, resp_buf + header_end), &valid);
+                    if (valid && body_len <= HTTP_BUF_SIZE - 1U - (uint32_t)header_end) {
+                        expected_total = (uint32_t)header_end + body_len;
+                        response_body_framing = 1;
+                        http_trace_event("HTTP CONTENT-LENGTH", (int)body_len);
+                    }
+                } else if (encoding) {
+                    int chunked = has_chunked_encoding(encoding,
+                        header_value_len(encoding, resp_buf + header_end));
+                    http_trace_event("HTTP TRANSFER-ENCODING CHUNKED", chunked);
+                    if (chunked) response_body_framing = 2;
+                }
+            }
+        }
+
+        if (response_body_framing == 1 && total >= expected_total) {
+            http_trace_event("HTTP FRAMED BODY COMPLETE", (int)expected_total);
+            break;
+        }
+        if (response_body_framing == 2 && header_end >= 0 &&
+            chunked_complete(resp_buf + header_end,
+                             total - (uint32_t)header_end)) {
+            http_trace_event("HTTP CHUNK TERMINATOR DETECTED", 1);
+            http_trace_event("HTTP CHUNKED BODY COMPLETE", (int)total);
+            break;
         }
         if (!tls_active && (http_conn.state == TCP_STATE_CLOSE_WAIT
             || http_conn.state == TCP_STATE_CLOSED)) break;
     }
+    http_trace_event("HTTP RECV CALLS", (int)recv_calls);
+    http_trace_event("HTTP SUCCESSFUL READS", (int)read_calls);
+    http_trace_event("HTTP NO-DATA CALLS", (int)no_data_calls);
     if (tls_active) nexos_tls_free(&tls);
     tcp_close(&http_conn);
 
     if (total == 0) {
+        http_trace_event("HTTP BODY FAILED", 0);
+        http_trace_end(0);
         kfree(resp_buf);
         klog(LOG_WARN, "HTTP: no data received");
         return 0;
@@ -314,6 +513,7 @@ http_response_t *http_get(const char *url) {
 
     r->status_code = parse_status(resp_buf, total);
     int body_off   = find_body(resp_buf, total);
+    http_trace_event("HTTP HEADERS COMPLETE", r->status_code);
 
     r->location[0] = 0;
     r->content_type[0] = 0;
@@ -356,6 +556,8 @@ http_response_t *http_get(const char *url) {
         }
     }
     kfree(resp_buf);
+    http_trace_event("HTTP BODY COMPLETE", (int)r->body_len);
+    http_trace_end(1);
     klog(LOG_INFO, "HTTP: %s status=%d body=%u bytes",
          url, r->status_code, r->body_len);
     return r;

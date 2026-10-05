@@ -7,6 +7,10 @@
 #include "../drivers/rtl8139.h"
 #include "../drivers/timer.h"
 
+#ifndef NEXOS_TCP_TRACE
+#define NEXOS_TCP_TRACE 0
+#endif
+
 #define TCP_HDR_LEN 20
 #define TCP_RTO_MS 500
 #define TCP_MAX_RETRIES 5
@@ -15,6 +19,10 @@
 
 static tcp_conn_t *connections[TCP_MAX_CONNECTIONS];
 static uint16_t tcp_next_port = 49152;
+static unsigned int tcp_trace_rx_logs;
+static unsigned int tcp_trace_ooo_logs;
+static unsigned int tcp_trace_window_logs;
+static uint64_t tcp_trace_last_rx;
 
 static uint32_t rd32(const uint8_t *p) { return ((uint32_t)p[0] << 24) |
     ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
@@ -81,6 +89,11 @@ static void promote_ooo(tcp_conn_t *c) {
             if (o->seq == c->rx_next && c->rx_len + o->len <= TCP_RX_BUF_SIZE) {
                 for (uint16_t j = 0; j < o->len; j++) c->rx_buf[c->rx_len++] = o->data[j];
                 c->rx_next += o->len; o->used = 0; changed = 1;
+                if (NEXOS_TCP_TRACE && tcp_trace_ooo_logs < 16) {
+                    klog(LOG_INFO, "TCP OOO RELEASE seq=%u len=%u next=%u",
+                         o->seq, o->len, c->rx_next);
+                    tcp_trace_ooo_logs++;
+                }
             }
         }
     } while (changed);
@@ -96,6 +109,11 @@ static void accept_payload(tcp_conn_t *c, uint32_t seq, const uint8_t *p, uint16
         uint16_t copy = n > TCP_MSS ? TCP_MSS : n;
         c->ooo[i].seq = seq; c->ooo[i].len = copy; c->ooo[i].used = 1;
         for (uint16_t j = 0; j < copy; j++) c->ooo[i].data[j] = p[j];
+        if (NEXOS_TCP_TRACE && tcp_trace_ooo_logs < 16) {
+            klog(LOG_INFO, "TCP OOO QUEUE seq=%u len=%u expected=%u",
+                 seq, copy, c->rx_next);
+            tcp_trace_ooo_logs++;
+        }
         return;
     }
 }
@@ -129,13 +147,28 @@ void tcp_receive(const uint8_t *data, uint16_t len, uint32_t src_ip) {
     }
     if (c->state != TCP_STATE_ESTABLISHED && c->state != TCP_STATE_FIN_WAIT) return;
     uint16_t plen = (uint16_t)(len - off);
+    if (plen) {
+        uint64_t now = timer_get_ticks();
+        uint64_t gap = tcp_trace_last_rx ? now - tcp_trace_last_rx : 0;
+        if (NEXOS_TCP_TRACE && (tcp_trace_rx_logs < 24 || gap >= 1000)) {
+            klog(LOG_INFO, "TCP DATA seq=%u ack=%u len=%u peer_win=%u gap=%u",
+                 seq, c->ack, plen, c->remote_window, (uint32_t)gap);
+            tcp_trace_rx_logs++;
+        }
+        tcp_trace_last_rx = now;
+    }
     accept_payload(c, seq, data + off, plen);
     if (plen || (flags & TCP_FLAG_FIN)) {
         if (flags & TCP_FLAG_FIN) {
             if (seq + plen == c->rx_next) c->rx_next++;
             c->state = TCP_STATE_CLOSE_WAIT;
         }
-        c->ack = c->rx_next; send_segment(c, c->seq, c->ack, 0, 0, TCP_FLAG_ACK);
+        c->ack = c->rx_next;
+        send_segment(c, c->seq, c->ack, 0, 0, TCP_FLAG_ACK);
+        if (NEXOS_TCP_TRACE && tcp_trace_rx_logs < 24) {
+            klog(LOG_INFO, "TCP ACK ack=%u win=%u", c->ack,
+                 advertised_window(c));
+        }
     }
 }
 
@@ -155,6 +188,10 @@ int tcp_connect(tcp_conn_t *c, uint32_t ip, uint16_t port) {
     c->remote_ip = ip; c->remote_port = port; c->local_port = tcp_next_port++;
     if (tcp_next_port < 49152) tcp_next_port = 49152;
     c->seq = (uint32_t)timer_get_ticks() | 1U; c->remote_window = 65535;
+    tcp_trace_rx_logs = 0;
+    tcp_trace_ooo_logs = 0;
+    tcp_trace_window_logs = 0;
+    tcp_trace_last_rx = 0;
     c->state = TCP_STATE_SYN_SENT;
     if (register_conn(c) < 0) return -1;
     uint32_t syn_seq = c->seq;
@@ -195,7 +232,18 @@ int tcp_recv(tcp_conn_t *c, uint8_t *buf, uint16_t maxlen, uint32_t timeout_ms) 
             uint16_t n = c->rx_len < maxlen ? c->rx_len : maxlen;
             for (uint16_t i = 0; i < n; i++) buf[i] = c->rx_buf[i];
             for (uint16_t i = n; i < c->rx_len; i++) c->rx_buf[i - n] = c->rx_buf[i];
-            c->rx_len -= n; return n;
+            c->rx_len -= n;
+            /* Reading from the socket reopens receive-buffer space. Send an
+             * immediate window update so a peer that filled the window does
+             * not wait for a retransmission timer. */
+            c->ack = c->rx_next;
+            send_segment(c, c->seq, c->ack, 0, 0, TCP_FLAG_ACK);
+            if (NEXOS_TCP_TRACE && tcp_trace_window_logs < 24) {
+                klog(LOG_INFO, "TCP WINDOW UPDATE ack=%u win=%u drained=%u",
+                     c->ack, advertised_window(c), n);
+                tcp_trace_window_logs++;
+            }
+            return n;
         }
         if (c->state == TCP_STATE_CLOSE_WAIT || c->state == TCP_STATE_CLOSED) return 0;
     }
